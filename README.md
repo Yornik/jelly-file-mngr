@@ -116,6 +116,7 @@ jellyfiler keeps a cache at `~/.cache/jellyfiler/cache.db` (created automaticall
 | What is cached | Benefit |
 |---|---|
 | TMDB search results | Running over 8 000 series files only hits TMDB once per unique title, not once per file. Persists across runs. |
+| AniList search results | Same as TMDB — anime fallback queries are cached identically, no separate store needed. |
 | Move history | Re-running the tool skips files already moved in a previous run. Safe to use as a resume mechanism if a run was interrupted. |
 
 Override the location with `--cache-db /path/to/custom.db`.
