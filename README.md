@@ -1,6 +1,6 @@
 # jelly-file-mngr
 
-Organize a messy library of media rips into a [Jellyfin](https://jellyfin.org/)-compatible directory structure using [guessit](https://github.com/guessit-io/guessit) for filename parsing and [TMDB](https://www.themoviedb.org/) for metadata matching.
+Organize a messy library of media rips into a [Jellyfin](https://jellyfin.org/)-compatible directory structure using [guessit](https://github.com/guessit-io/guessit) for filename parsing, [TMDB](https://www.themoviedb.org/) for metadata matching, and [AniList](https://anilist.co/) as an automatic fallback for anime titles.
 
 **Dry-run by default.** Nothing is ever moved until you explicitly pass `--apply`.  
 **Interactive by default.** When a match is ambiguous you are prompted to choose. Pass `--no-interactive` for automation.
@@ -38,6 +38,7 @@ output/
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
 - A free [TMDB API key](https://www.themoviedb.org/settings/api)
+- AniList requires no API key — used automatically as a fallback for anime
 
 ---
 
@@ -115,6 +116,7 @@ jellyfiler keeps a cache at `~/.cache/jellyfiler/cache.db` (created automaticall
 | What is cached | Benefit |
 |---|---|
 | TMDB search results | Running over 8 000 series files only hits TMDB once per unique title, not once per file. Persists across runs. |
+| AniList search results | Same as TMDB — anime fallback queries are cached identically, no separate store needed. |
 | Move history | Re-running the tool skips files already moved in a previous run. Safe to use as a resume mechanism if a run was interrupted. |
 
 Override the location with `--cache-db /path/to/custom.db`.
