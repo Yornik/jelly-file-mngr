@@ -99,7 +99,9 @@ def organize(
         console.print("[bold cyan]DRY-RUN mode — no files will be moved (use --apply)[/bold cyan]")
 
     if interactive:
-        console.print("[bold magenta]Interactive mode — you will be prompted on ambiguous matches[/bold magenta]")
+        console.print(
+            "[bold magenta]Interactive mode — you will be prompted on ambiguous matches[/bold magenta]"
+        )
 
     tmdb = _get_tmdb_client()
 
@@ -136,16 +138,18 @@ def organize(
         # Unknown type — skip or ask
         if guessed.media_type == MediaType.UNKNOWN:
             console.print(f"[yellow]SKIP (unknown type):[/yellow] {file.name}")
-            planned_moves.append(PlannedMove(
-                source=file,
-                destination=dest,
-                media_type=MediaType.UNKNOWN,
-                tmdb_id=None,
-                matched_title=guessed.title or file.name,
-                confidence="low",
-                skipped=True,
-                skip_reason="Could not determine media type — pass --type to force",
-            ))
+            planned_moves.append(
+                PlannedMove(
+                    source=file,
+                    destination=dest,
+                    media_type=MediaType.UNKNOWN,
+                    tmdb_id=None,
+                    matched_title=guessed.title or file.name,
+                    confidence="low",
+                    skipped=True,
+                    skip_reason="Could not determine media type — pass --type to force",
+                )
+            )
             continue
 
         # Missing title — prompt if interactive, else skip
@@ -155,7 +159,23 @@ def organize(
                 if manual:
                     guessed.title = manual
                 else:
-                    planned_moves.append(PlannedMove(
+                    planned_moves.append(
+                        PlannedMove(
+                            source=file,
+                            destination=dest,
+                            media_type=guessed.media_type,
+                            tmdb_id=None,
+                            matched_title=file.name,
+                            confidence="low",
+                            skipped=True,
+                            skip_reason="User skipped — no title provided",
+                        )
+                    )
+                    continue
+            else:
+                console.print(f"[yellow]SKIP (no title parsed):[/yellow] {file.name}")
+                planned_moves.append(
+                    PlannedMove(
                         source=file,
                         destination=dest,
                         media_type=guessed.media_type,
@@ -163,21 +183,9 @@ def organize(
                         matched_title=file.name,
                         confidence="low",
                         skipped=True,
-                        skip_reason="User skipped — no title provided",
-                    ))
-                    continue
-            else:
-                console.print(f"[yellow]SKIP (no title parsed):[/yellow] {file.name}")
-                planned_moves.append(PlannedMove(
-                    source=file,
-                    destination=dest,
-                    media_type=guessed.media_type,
-                    tmdb_id=None,
-                    matched_title=file.name,
-                    confidence="low",
-                    skipped=True,
-                    skip_reason="guessit could not extract a title — run with --interactive",
-                ))
+                        skip_reason="guessit could not extract a title — run with --interactive",
+                    )
+                )
                 continue
 
         # TMDB lookup — SQLite cache first, then API
@@ -195,16 +203,18 @@ def organize(
         except Exception as exc:
             err_console.print(f"[red]TMDB error for '{file.name}': {exc}[/red]")
             tmdb_errors += 1
-            planned_moves.append(PlannedMove(
-                source=file,
-                destination=dest,
-                media_type=guessed.media_type,
-                tmdb_id=None,
-                matched_title=guessed.title,
-                confidence="low",
-                skipped=True,
-                skip_reason=f"TMDB query failed: {exc}",
-            ))
+            planned_moves.append(
+                PlannedMove(
+                    source=file,
+                    destination=dest,
+                    media_type=guessed.media_type,
+                    tmdb_id=None,
+                    matched_title=guessed.title,
+                    confidence="low",
+                    skipped=True,
+                    skip_reason=f"TMDB query failed: {exc}",
+                )
+            )
             continue
 
         match = _resolve_match(
@@ -219,16 +229,18 @@ def organize(
                 f"{len(matches)} TMDB results, none matched confidently. "
                 "Run with --interactive to pick manually."
             )
-            planned_moves.append(PlannedMove(
-                source=file,
-                destination=dest,
-                media_type=guessed.media_type,
-                tmdb_id=None,
-                matched_title=guessed.title,
-                confidence="low",
-                skipped=True,
-                skip_reason=f"Ambiguous: {len(matches)} results, no confident match. Use --interactive.",
-            ))
+            planned_moves.append(
+                PlannedMove(
+                    source=file,
+                    destination=dest,
+                    media_type=guessed.media_type,
+                    tmdb_id=None,
+                    matched_title=guessed.title,
+                    confidence="low",
+                    skipped=True,
+                    skip_reason=f"Ambiguous: {len(matches)} results, no confident match. Use --interactive.",
+                )
+            )
             continue
 
         planned_moves.append(plan_move(guessed, match, dest, file))

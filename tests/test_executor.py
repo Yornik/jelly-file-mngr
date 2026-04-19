@@ -1,6 +1,5 @@
 """Tests for the executor safety checks."""
 
-
 from pathlib import Path
 
 from jellyfiler.executor import _preflight

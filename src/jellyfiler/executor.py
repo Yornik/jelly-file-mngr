@@ -36,9 +36,7 @@ def _preflight(moves: list[PlannedMove]) -> list[str]:
             problems.append(f"Source no longer exists: {move.source}")
 
         if move.destination.exists():
-            problems.append(
-                f"Destination already exists (would overwrite): {move.destination}"
-            )
+            problems.append(f"Destination already exists (would overwrite): {move.destination}")
 
         if move.destination in seen_destinations:
             problems.append(
@@ -97,9 +95,7 @@ def execute(plan: Plan, dry_run: bool = True, cache: "Cache | None" = None) -> N
 
             # Final safety check immediately before moving
             if move.destination.exists():
-                console.print(
-                    f"[red]SKIP (appeared since preflight): {move.destination}[/red]"
-                )
+                console.print(f"[red]SKIP (appeared since preflight): {move.destination}[/red]")
                 failed += 1
                 continue
 

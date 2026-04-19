@@ -1,6 +1,5 @@
 """Interactive prompts for ambiguous matches."""
 
-
 import typer
 from rich.console import Console
 from rich.table import Table
