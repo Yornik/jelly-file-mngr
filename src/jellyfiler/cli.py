@@ -62,7 +62,10 @@ def _resolve_match(
 @app.command()
 def organize(
     source: Annotated[Path, typer.Argument(help="Source directory containing media files")],
-    dest: Annotated[Path, typer.Argument(help="Destination root for organized output")],
+    dest: Annotated[
+        Path | None,
+        typer.Argument(help="Destination root. Omit when using --in-place."),
+    ] = None,
     media_type: Annotated[
         MediaType,
         typer.Option("--type", "-t", help="Force media type (movie or episode)"),
@@ -78,6 +81,20 @@ def organize(
             help="Prompt for input when a match is ambiguous or missing (default: on).",
         ),
     ] = True,
+    in_place: Annotated[
+        bool,
+        typer.Option(
+            "--in-place",
+            help="Reorganize within SOURCE itself instead of copying to a separate DEST.",
+        ),
+    ] = False,
+    cleanup_empty_dirs: Annotated[
+        bool,
+        typer.Option(
+            "--cleanup-empty-dirs",
+            help="Remove empty source directories after moving files (only with --in-place --apply).",
+        ),
+    ] = False,
     cache_db: Annotated[
         Path,
         typer.Option("--cache-db", help="Path to the SQLite cache database."),
@@ -85,6 +102,7 @@ def organize(
 ) -> None:
     """Scan SOURCE, match against TMDB, and organize into DEST.
 
+    Pass --in-place to reorganize within SOURCE itself (no separate DEST needed).
     Dry-run by default — pass --apply to move files.
     Pass --interactive to be prompted when matches are uncertain.
 
@@ -94,6 +112,25 @@ def organize(
     Pre-flight checks run before any file is touched. On any failure the
     operation aborts immediately with a clear message.
     """
+    # Resolve destination
+    if in_place:
+        if dest is not None:
+            err_console.print(
+                "[bold red]Error:[/bold red] Cannot combine --in-place with a DEST argument."
+            )
+            raise typer.Exit(1)
+        dest = source
+        console.print(f"[bold yellow]IN-PLACE mode — reorganizing within {source}[/bold yellow]")
+    elif dest is None:
+        err_console.print("[bold red]Error:[/bold red] DEST is required unless --in-place is used.")
+        raise typer.Exit(1)
+
+    if cleanup_empty_dirs and not in_place:
+        err_console.print(
+            "[bold red]Error:[/bold red] --cleanup-empty-dirs only makes sense with --in-place."
+        )
+        raise typer.Exit(1)
+
     dry_run = not apply
 
     if dry_run:
@@ -283,3 +320,27 @@ def organize(
     if tmdb_errors:
         err_console.print(f"\n[yellow]{tmdb_errors} TMDB error(s) occurred — see above.[/yellow]")
         raise typer.Exit(1)
+
+    # Clean up empty source directories (in-place + apply only)
+    if in_place and apply and cleanup_empty_dirs and not dry_run:
+        _remove_empty_dirs(source)
+
+
+def _remove_empty_dirs(root: Path) -> None:
+    """Recursively remove empty directories under root (but not root itself)."""
+    removed = 0
+    # Walk bottom-up so children are processed before parents
+    for dirpath in sorted(root.rglob("*"), reverse=True):
+        if dirpath == root:
+            continue
+        if dirpath.is_dir():
+            try:
+                dirpath.rmdir()  # only succeeds if directory is empty
+                console.print(f"[dim]Removed empty dir: {dirpath}[/dim]")
+                removed += 1
+            except OSError:
+                pass  # not empty, skip
+    if removed:
+        console.print(
+            f"[dim]Cleaned up {removed} empty director{'y' if removed == 1 else 'ies'}.[/dim]"
+        )

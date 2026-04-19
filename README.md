@@ -70,6 +70,43 @@ uv run jellyfiler /source /dest --apply
 uv run jellyfiler /source /dest --no-interactive --apply
 ```
 
+### In-place mode
+
+Reorganize within the source directory itself — no separate destination needed.
+Useful when `movies/` and `series/` are already separate and you just want clean structure inside each.
+
+```bash
+# Dry run in-place
+uv run jellyfiler /media/movies --in-place
+
+# Apply in-place
+uv run jellyfiler /media/movies --in-place --apply
+
+# Apply in-place and remove leftover empty release folders
+uv run jellyfiler /media/movies --in-place --apply --cleanup-empty-dirs
+```
+
+Before:
+```
+movies/
+  Blade.Runner.2049.2017.Hybrid.2160p.UHD.Blu-ray.Remux.HEVC.DV.HDR.TrueHD.7.1.Atmos-HDT.mkv
+  Futurama.S12.1080p.x265-ELiTE/
+    Futurama.S12E01.1080p.x265-ELiTE.mkv
+```
+
+After:
+```
+movies/
+  Blade Runner 2049 (2017)/
+    Blade Runner 2049 (2017).mkv
+  Futurama/
+    Season 12/
+      S12E01.mkv
+```
+
+> **Note:** `--cleanup-empty-dirs` uses `rmdir` which only removes truly empty directories.
+> Non-empty directories (e.g. a release folder that still has subtitle files) are left untouched.
+
 ---
 
 ## SQLite cache
