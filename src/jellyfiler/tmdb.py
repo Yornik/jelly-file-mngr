@@ -1,10 +1,13 @@
 """TMDB API client — search for movies and TV shows."""
 
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
 from jellyfiler.models import MediaType, TmdbMatch
+
+__all__ = ["TmdbClient", "TmdbMatch", "best_match"]
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 _REQUEST_TIMEOUT = 10
@@ -14,19 +17,20 @@ _REQUEST_TIMEOUT = 10
 class TmdbClient:
     api_key: str
 
-    def _get(self, endpoint: str, params: dict) -> dict:
+    def _get(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
         params = {"api_key": self.api_key, **params}
         with httpx.Client(timeout=_REQUEST_TIMEOUT) as client:
             response = client.get(f"{TMDB_BASE}{endpoint}", params=params)
         response.raise_for_status()
-        return response.json()
+        result: dict[str, Any] = response.json()
+        return result
 
     def search_movie(self, title: str, year: int | None = None) -> list[TmdbMatch]:
-        params: dict = {"query": title, "include_adult": "false"}
+        params: dict[str, Any] = {"query": title, "include_adult": "false"}
         if year:
             params["year"] = year
         data = self._get("/search/movie", params)
-        results = data.get("results", [])
+        results: list[dict[str, Any]] = data.get("results", [])
         return [
             TmdbMatch(
                 tmdb_id=r["id"],
@@ -38,11 +42,11 @@ class TmdbClient:
         ]
 
     def search_tv(self, title: str, year: int | None = None) -> list[TmdbMatch]:
-        params: dict = {"query": title}
+        params: dict[str, Any] = {"query": title}
         if year:
             params["first_air_date_year"] = year
         data = self._get("/search/tv", params)
-        results = data.get("results", [])
+        results: list[dict[str, Any]] = data.get("results", [])
         return [
             TmdbMatch(
                 tmdb_id=r["id"],
@@ -65,17 +69,14 @@ def best_match(
 
     guessed_lower = guessed_title.lower()
 
-    # Prefer exact title + year match
     for m in matches:
         if m.title.lower() == guessed_lower and m.year == guessed_year:
             return m
 
-    # Prefer exact title match regardless of year
     for m in matches:
         if m.title.lower() == guessed_lower:
             return m
 
-    # Fall back to first result only if title is at least a substring match
     first = matches[0]
     if guessed_lower in first.title.lower() or first.title.lower() in guessed_lower:
         return first

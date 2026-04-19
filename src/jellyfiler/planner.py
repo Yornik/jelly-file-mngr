@@ -3,8 +3,7 @@
 import re
 from pathlib import Path
 
-from jellyfiler.guesser import GuessedMedia
-from jellyfiler.models import MediaType, Plan, PlannedMove, TmdbMatch
+from jellyfiler.models import GuessedMedia, MediaType, Plan, PlannedMove, TmdbMatch
 
 
 def _safe_name(name: str) -> str:

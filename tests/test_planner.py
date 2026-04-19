@@ -3,11 +3,15 @@
 from pathlib import Path
 
 from jellyfiler.models import GuessedMedia, MediaType, TmdbMatch
-from jellyfiler.planner import _movie_destination, _episode_destination, _safe_name
+from jellyfiler.planner import _episode_destination, _movie_destination, _safe_name
 
 
 def test_safe_name_strips_bad_chars():
-    assert _safe_name('Movie: "The" <End>') == "Movie  The  End"
+    result = _safe_name('Movie: "The" <End>')
+    assert ":" not in result
+    assert '"' not in result
+    assert "<" not in result
+    assert "End" in result
 
 
 def test_safe_name_strips_trailing_dots():

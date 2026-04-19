@@ -1,10 +1,10 @@
 """Tests for the executor safety checks."""
 
-import pytest
 
 from pathlib import Path
-from jellyfiler.executor import ExecutionError, _preflight
-from jellyfiler.models import MediaType, Plan, PlannedMove
+
+from jellyfiler.executor import _preflight
+from jellyfiler.models import MediaType, PlannedMove
 
 
 def _move(source: Path, dest: Path) -> PlannedMove:

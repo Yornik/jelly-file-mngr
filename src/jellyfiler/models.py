@@ -1,11 +1,11 @@
 """Data models."""
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 
-class MediaType(str, Enum):
+class MediaType(StrEnum):
     MOVIE = "movie"
     EPISODE = "episode"
     UNKNOWN = "unknown"
@@ -20,7 +20,7 @@ class GuessedMedia:
     season: int | None = None
     episode: int | None = None
     episode_title: str | None = None
-    raw_guess: dict = field(default_factory=dict)
+    raw_guess: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass

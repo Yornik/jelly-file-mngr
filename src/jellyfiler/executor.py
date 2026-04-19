@@ -10,10 +10,14 @@ Data safety rules:
 
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 
 from jellyfiler.models import Plan, PlannedMove
+
+if TYPE_CHECKING:
+    from jellyfiler.cache import Cache
 
 console = Console()
 
@@ -45,7 +49,7 @@ def _preflight(moves: list[PlannedMove]) -> list[str]:
     return problems
 
 
-def execute(plan: Plan, dry_run: bool = True) -> None:
+def execute(plan: Plan, dry_run: bool = True, cache: "Cache | None" = None) -> None:
     """Execute the plan.
 
     In dry-run mode (default) nothing is touched — the plan is printed only.
@@ -101,6 +105,8 @@ def execute(plan: Plan, dry_run: bool = True) -> None:
 
             shutil.move(str(move.source), str(move.destination))
             console.print(f"[green]✓[/green] {move.source.name}  →  {move.destination}")
+            if cache is not None:
+                cache.record_move(move.source, move.destination)
             moved += 1
 
         except Exception as exc:

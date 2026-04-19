@@ -7,13 +7,14 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.executor import ExecutionError, execute
 from jellyfiler.guesser import guess
 from jellyfiler.interactive import prompt_manual_title, prompt_tmdb_match
 from jellyfiler.models import MediaType, PlannedMove
 from jellyfiler.planner import build_plan, plan_move
 from jellyfiler.scanner import find_media_files
-from jellyfiler.tmdb import TmdbClient, best_match
+from jellyfiler.tmdb import TmdbClient, TmdbMatch, best_match
 
 app = typer.Typer(
     name="jellyfiler",
@@ -39,10 +40,10 @@ def _resolve_match(
     file: Path,
     guessed_title: str,
     guessed_year: int | None,
-    matches: list,
+    matches: list[TmdbMatch],
     media_type: MediaType,
     interactive: bool,
-) -> object | None:
+) -> TmdbMatch | None:
     """Return the best match, prompting the user if interactive and result is ambiguous."""
     match = best_match(matches, guessed_title, guessed_year)
 
@@ -76,6 +77,10 @@ def organize(
             help="Prompt for input when a match is ambiguous or missing (default: on).",
         ),
     ] = True,
+    cache_db: Annotated[
+        Path,
+        typer.Option("--cache-db", help="Path to the SQLite cache database."),
+    ] = _DEFAULT_DB,
 ) -> None:
     """Scan SOURCE, match against TMDB, and organize into DEST.
 
@@ -113,8 +118,15 @@ def organize(
 
     planned_moves: list[PlannedMove] = []
     tmdb_errors = 0
+    cache = Cache(cache_db)
+    console.print(f"[dim]Cache: {cache_db}[/dim]")
 
     for file in files:
+        # Skip files already successfully moved in a previous run
+        if cache.already_moved(file):
+            console.print(f"[dim]SKIP (already moved in previous run):[/dim] {file.name}")
+            continue
+
         guessed = guess(file)
 
         # Allow user to override detected type
@@ -168,12 +180,17 @@ def organize(
                 ))
                 continue
 
-        # TMDB lookup
+        # TMDB lookup — SQLite cache first, then API
         try:
-            if guessed.media_type == MediaType.MOVIE:
+            cached = cache.get_tmdb(guessed.title, guessed.year, guessed.media_type)
+            if cached is not None:
+                matches = cached
+            elif guessed.media_type == MediaType.MOVIE:
                 matches = tmdb.search_movie(guessed.title, guessed.year)
+                cache.set_tmdb(guessed.title, guessed.year, guessed.media_type, matches)
             else:
                 matches = tmdb.search_tv(guessed.title, guessed.year)
+                cache.set_tmdb(guessed.title, guessed.year, guessed.media_type, matches)
 
         except Exception as exc:
             err_console.print(f"[red]TMDB error for '{file.name}': {exc}[/red]")
@@ -219,7 +236,7 @@ def organize(
     plan = build_plan(planned_moves)
 
     try:
-        execute(plan, dry_run=dry_run)
+        execute(plan, dry_run=dry_run, cache=cache)
     except ExecutionError as exc:
         err_console.print(f"\n[bold red]{exc}[/bold red]")
         raise typer.Exit(1) from exc
