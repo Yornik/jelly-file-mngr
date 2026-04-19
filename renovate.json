@@ -23,6 +23,12 @@
       "matchUpdateTypes": ["minor", "patch", "digest"],
       "automerge": true,
       "automergeType": "pr"
+    },
+    {
+      "matchCategories": ["security"],
+      "automerge": true,
+      "automergeType": "pr",
+      "labels": ["security"]
     }
   ]
 }
