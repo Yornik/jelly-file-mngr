@@ -7,6 +7,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from jellyfiler.anilist import looks_like_anime, search_anime
 from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.executor import ExecutionError, execute
 from jellyfiler.guesser import guess
@@ -220,6 +221,32 @@ def organize(
         match = _resolve_match(
             file, guessed.title, guessed.year, matches, guessed.media_type, interactive
         )
+
+        # AniList fallback: if TMDB missed and this looks like anime, try AniList
+        if (
+            match is None
+            and guessed.media_type == MediaType.EPISODE
+            and looks_like_anime(file.name)
+        ):
+            try:
+                al_cached = cache.get_tmdb(guessed.title, guessed.year, MediaType.EPISODE)
+                if al_cached is None:
+                    al_matches = search_anime(guessed.title)
+                    cache.set_tmdb(guessed.title, guessed.year, MediaType.EPISODE, al_matches)
+                else:
+                    al_matches = al_cached
+                if al_matches:
+                    console.print(f"[dim]TMDB missed '{guessed.title}' — trying AniList...[/dim]")
+                    match = _resolve_match(
+                        file,
+                        guessed.title,
+                        guessed.year,
+                        al_matches,
+                        guessed.media_type,
+                        interactive,
+                    )
+            except Exception as exc:
+                console.print(f"[dim]AniList fallback failed for '{file.name}': {exc}[/dim]")
 
         if not match and not interactive and matches:
             # Non-interactive, no confident match but results exist — prompt anyway
