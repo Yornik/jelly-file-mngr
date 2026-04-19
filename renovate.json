@@ -1,27 +1,28 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
+  "lockFileMaintenance": {
+    "enabled": true
+  },
   "packageRules": [
     {
-      "matchManagers": ["uv"],
+      "matchManagers": ["pep621"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "minimumReleaseAge": "1 week",
       "automerge": true,
-      "automergeType": "pr",
-      "matchUpdateTypes": ["minor", "patch"]
+      "automergeType": "pr"
     },
     {
-      "matchManagers": ["uv"],
+      "matchManagers": ["pep621"],
       "matchUpdateTypes": ["major"],
       "automerge": false,
       "labels": ["major-update"]
     },
     {
       "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
       "automerge": true,
-      "automergeType": "pr",
-      "matchUpdateTypes": ["minor", "patch", "digest"]
+      "automergeType": "pr"
     }
-  ],
-  "uv": {
-    "enabled": true
-  }
+  ]
 }
