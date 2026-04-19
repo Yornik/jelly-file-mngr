@@ -3,13 +3,13 @@
   "extends": ["config:recommended"],
   "packageRules": [
     {
-      "matchManagers": ["pep621", "pip_requirements"],
+      "matchManagers": ["uv", "pep621"],
       "matchUpdateTypes": ["minor", "patch"],
       "automerge": true,
       "automergeType": "pr"
     },
     {
-      "matchManagers": ["pep621", "pip_requirements"],
+      "matchManagers": ["uv", "pep621"],
       "matchUpdateTypes": ["major"],
       "automerge": false,
       "labels": ["major-update"]
