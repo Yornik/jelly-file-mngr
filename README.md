@@ -71,6 +71,19 @@ uv run jellyfiler /source /dest --no-interactive --apply
 
 ---
 
+## SQLite cache
+
+jellyfiler keeps a cache at `~/.cache/jellyfiler/cache.db` (created automatically).
+
+| What is cached | Benefit |
+|---|---|
+| TMDB search results | Running over 8 000 series files only hits TMDB once per unique title, not once per file. Persists across runs. |
+| Move history | Re-running the tool skips files already moved in a previous run. Safe to use as a resume mechanism if a run was interrupted. |
+
+Override the location with `--cache-db /path/to/custom.db`.
+
+---
+
 ## Safety guarantees
 
 - **Dry-run is the default.** You must pass `--apply` to move anything.
