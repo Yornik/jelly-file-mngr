@@ -68,7 +68,6 @@ sudo umount /mnt/smbshare
 sudo mount -t cifs //192.168.1.42/lilnasx /mnt/smbshare -o username=yornik,uid=1000,gid=1000,file_mode=0755,dir_mode=0755
 ```
 
-**Active PR:** `feat/junk-collector` — not yet merged to main. Contains: junk collector, parent-dir junk detection, smarter guesser (parent-dir title/season fallback), TMDB circuit breaker, progress bar, plan table UX, summary panel, title normalization fixes, pinned cache.
 
 ## Title parsing quirks to know about
 
