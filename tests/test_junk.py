@@ -1,10 +1,10 @@
 """Tests for junk file detection and quarantine."""
 
-import pytest
 from pathlib import Path
 
-from jellyfiler.junk import find_junk, is_junk, junk_destination, move_junk
+import pytest
 
+from jellyfiler.junk import find_junk, is_junk, junk_destination, move_junk
 
 # ---------------------------------------------------------------------------
 # is_junk — non-video sidecar extensions

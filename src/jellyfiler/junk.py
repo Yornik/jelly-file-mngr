@@ -10,8 +10,8 @@ In dry-run mode junk files are reported without being moved.
 With --apply they are moved to dest/_Junk/<relative-path-from-source>/filename.
 """
 
-import shutil
 import re
+import shutil
 from pathlib import Path
 
 from rich.console import Console
