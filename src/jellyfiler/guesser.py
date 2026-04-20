@@ -11,15 +11,11 @@ def _clean_title(title: str) -> str:
     return " ".join(title.split()).strip()
 
 
-def guess(path: Path) -> GuessedMedia:
-    """Parse a file or directory name into structured media metadata.
+def _parse_name(name: str) -> dict:
+    return dict(guessit.guessit(name))
 
-    guessit handles the heavy lifting of stripping release group noise
-    (BluRay, x265, REMUX, ELiTE, etc.) and extracting title/year/episode.
-    """
-    name = path.name if path.is_file() else path.name
-    result = dict(guessit.guessit(name))
 
+def _extract(result: dict) -> tuple[MediaType, str, int | None, int | None, int | None]:
     raw_type = result.get("type", "unknown")
     if raw_type == "movie":
         media_type = MediaType.MOVIE
@@ -48,6 +44,41 @@ def guess(path: Path) -> GuessedMedia:
         episode = episode[0]
     episode = int(episode) if episode else None
 
+    return media_type, title, year, season, episode
+
+
+def guess(path: Path) -> GuessedMedia:
+    """Parse a filename (and its parent directory name) into structured media metadata.
+
+    guessit parses the filename first. Any missing fields (title, year, season)
+    are filled in from the parent directory name, which often carries the show
+    title and season pack info that individual episode files omit.
+    """
+    file_result = _parse_name(path.name)
+    media_type, title, year, season, episode = _extract(file_result)
+
+    # Fill gaps using the parent directory name — release groups often put the
+    # show title / season / year there even when individual filenames are bare.
+    parent_name = path.parent.name
+    if parent_name and parent_name not in {".", ""}:
+        dir_result = _parse_name(parent_name)
+        _, dir_title, dir_year, dir_season, _ = _extract(dir_result)
+
+        if not title and dir_title:
+            title = dir_title
+        if not year and dir_year:
+            year = dir_year
+        if not season and dir_season:
+            season = dir_season
+        # Prefer file-level media type; fall back to dir if unknown
+        if media_type == MediaType.UNKNOWN and dir_result.get("type") != "unknown":
+            _, _, _, _, _ = _extract(dir_result)
+            raw = dir_result.get("type", "unknown")
+            if raw == "movie":
+                media_type = MediaType.MOVIE
+            elif raw == "episode":
+                media_type = MediaType.EPISODE
+
     return GuessedMedia(
         source_path=path,
         media_type=media_type,
@@ -55,6 +86,6 @@ def guess(path: Path) -> GuessedMedia:
         year=year,
         season=season,
         episode=episode,
-        episode_title=result.get("episode_title"),
-        raw_guess=result,
+        episode_title=file_result.get("episode_title"),
+        raw_guess=file_result,
     )
