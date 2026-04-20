@@ -1,6 +1,7 @@
 """Tests for filename parsing."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 from jellyfiler.guesser import guess
 from jellyfiler.models import MediaType
@@ -44,3 +45,34 @@ def test_title_cleaning():
     g = guess(Path("The.Dark.Knight.2008.IMAX.4K.mkv"))
     assert g.title == "The Dark Knight"
     assert g.year == 2008
+
+
+def test_unknown_type():
+    # Force guessit to return an unrecognised type
+    with patch("jellyfiler.guesser.guessit.guessit", return_value={"type": "other", "title": "X"}):
+        g = guess(Path("X.mkv"))
+    assert g.media_type == MediaType.UNKNOWN
+
+
+def test_list_title_uses_first_element():
+    with patch("jellyfiler.guesser.guessit.guessit", return_value={"type": "movie", "title": ["First", "Second"]}):
+        g = guess(Path("X.mkv"))
+    assert g.title == "First"
+
+
+def test_list_year_uses_first_element():
+    with patch("jellyfiler.guesser.guessit.guessit", return_value={"type": "movie", "title": "Movie", "year": [2020, 2021]}):
+        g = guess(Path("X.mkv"))
+    assert g.year == 2020
+
+
+def test_list_season_uses_first_element():
+    with patch("jellyfiler.guesser.guessit.guessit", return_value={"type": "episode", "title": "Show", "season": [1, 2], "episode": 1}):
+        g = guess(Path("X.mkv"))
+    assert g.season == 1
+
+
+def test_list_episode_uses_first_element():
+    with patch("jellyfiler.guesser.guessit.guessit", return_value={"type": "episode", "title": "Show", "season": 1, "episode": [3, 4]}):
+        g = guess(Path("X.mkv"))
+    assert g.episode == 3

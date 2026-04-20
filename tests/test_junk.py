@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from jellyfiler.junk import find_junk, is_junk, junk_destination, move_junk
+from jellyfiler.junk import find_junk, is_junk, junk_destination, move_junk, report_junk
 
 # ---------------------------------------------------------------------------
 # is_junk — non-video sidecar extensions
@@ -255,3 +255,27 @@ def test_move_junk_empty_list(tmp_path):
     moved, failed = move_junk([], tmp_path / "source", tmp_path / "dest")
     assert moved == 0
     assert failed == 0
+
+
+# ---------------------------------------------------------------------------
+# report_junk
+# ---------------------------------------------------------------------------
+
+def test_report_junk_empty_list(tmp_path, capsys):
+    report_junk([], tmp_path / "source", tmp_path / "dest", dry_run=True)
+    # Should not raise — Rich output goes to its own console, no assertion needed
+
+
+def test_report_junk_dry_run(tmp_path):
+    source = tmp_path / "source"
+    dest = tmp_path / "dest"
+    files = [source / "Sample.mkv", source / "cover.jpg"]
+    # Should not raise
+    report_junk(files, source, dest, dry_run=True)
+
+
+def test_report_junk_live(tmp_path):
+    source = tmp_path / "source"
+    dest = tmp_path / "dest"
+    files = [source / "Sample.mkv"]
+    report_junk(files, source, dest, dry_run=False)
