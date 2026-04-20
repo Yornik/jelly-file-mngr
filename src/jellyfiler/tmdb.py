@@ -18,9 +18,9 @@ class TmdbClient:
     api_key: str
 
     def _get(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        params = {"api_key": self.api_key, **params}
         with httpx.Client(timeout=_REQUEST_TIMEOUT) as client:
-            response = client.get(f"{TMDB_BASE}{endpoint}", params=params, headers=headers)
+            response = client.get(f"{TMDB_BASE}{endpoint}", params=params)
         response.raise_for_status()
         result: dict[str, Any] = response.json()
         return result
