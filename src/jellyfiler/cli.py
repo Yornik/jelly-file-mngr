@@ -12,6 +12,7 @@ from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.executor import ExecutionError, execute
 from jellyfiler.guesser import guess
 from jellyfiler.interactive import prompt_manual_title, prompt_tmdb_match
+from jellyfiler.junk import is_junk, move_junk, report_junk
 from jellyfiler.models import MediaType, PlannedMove
 from jellyfiler.planner import build_plan, plan_move
 from jellyfiler.scanner import find_media_files
@@ -157,6 +158,7 @@ def organize(
     console.print(f"Found [bold]{len(files)}[/bold] media files. Querying TMDB...\n")
 
     planned_moves: list[PlannedMove] = []
+    junk_files: list[Path] = []
     tmdb_errors = 0
     cache = Cache(cache_db)
     console.print(f"[dim]Cache: {cache_db}[/dim]")
@@ -165,6 +167,12 @@ def organize(
         # Skip files already successfully moved in a previous run
         if cache.already_moved(file):
             console.print(f"[dim]SKIP (already moved in previous run):[/dim] {file.name}")
+            continue
+
+        # Identify junk before any title parsing so junk never triggers a prompt
+        if is_junk(file):
+            console.print(f"[dim]JUNK:[/dim] {file.name}")
+            junk_files.append(file)
             continue
 
         guessed = guess(file)
@@ -308,6 +316,13 @@ def organize(
             continue
 
         planned_moves.append(plan_move(guessed, match, dest, file))
+
+    if junk_files:
+        report_junk(junk_files, source, dest, dry_run)
+        if not dry_run:
+            moved, failed = move_junk(junk_files, source, dest)
+            if failed:
+                err_console.print(f"[yellow]{failed} junk file(s) could not be moved.[/yellow]")
 
     plan = build_plan(planned_moves)
 
