@@ -198,7 +198,7 @@ def organize(
 
     with Progress(
         SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}", no_wrap=True),
+        TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         MofNCompleteColumn(),
         console=console,
