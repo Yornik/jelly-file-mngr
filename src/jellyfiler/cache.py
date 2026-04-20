@@ -24,6 +24,15 @@ CREATE TABLE IF NOT EXISTS tmdb_cache (
     PRIMARY KEY (title_lower, year, media_type)
 );
 
+CREATE TABLE IF NOT EXISTS tmdb_pinned (
+    title_lower TEXT NOT NULL,
+    year        INTEGER,
+    media_type  TEXT NOT NULL,
+    match_json  TEXT NOT NULL,
+    pinned_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (title_lower, year, media_type)
+);
+
 CREATE TABLE IF NOT EXISTS move_log (
     source_path TEXT PRIMARY KEY,
     dest_path   TEXT NOT NULL,
@@ -84,6 +93,45 @@ class Cache:
             VALUES (?, ?, ?, ?)
             ON CONFLICT(title_lower, year, media_type)
             DO UPDATE SET results_json=excluded.results_json, cached_at=datetime('now')
+            """,
+            (title.lower(), year, media_type.value, serialised),
+        )
+        self._conn.commit()
+
+    # ── Pinned choices (user-confirmed interactive picks) ─────────────
+
+    def get_pinned(self, title: str, year: int | None, media_type: MediaType) -> TmdbMatch | None:
+        row = self._conn.execute(
+            "SELECT match_json FROM tmdb_pinned WHERE title_lower=? AND year IS ? AND media_type=?",
+            (title.lower(), year, media_type.value),
+        ).fetchone()
+        if row is None:
+            return None
+        r: dict[str, Any] = json.loads(row[0])
+        return TmdbMatch(
+            tmdb_id=int(r["tmdb_id"]),
+            title=str(r["title"]),
+            year=int(r["year"]) if r.get("year") is not None else None,
+            media_type=MediaType(str(r["media_type"])),
+        )
+
+    def set_pinned(
+        self, title: str, year: int | None, media_type: MediaType, match: TmdbMatch
+    ) -> None:
+        serialised = json.dumps(
+            {
+                "tmdb_id": match.tmdb_id,
+                "title": match.title,
+                "year": match.year,
+                "media_type": match.media_type.value,
+            }
+        )
+        self._conn.execute(
+            """
+            INSERT INTO tmdb_pinned (title_lower, year, media_type, match_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(title_lower, year, media_type)
+            DO UPDATE SET match_json=excluded.match_json, pinned_at=datetime('now')
             """,
             (title.lower(), year, media_type.value, serialised),
         )

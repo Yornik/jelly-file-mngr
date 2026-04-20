@@ -88,3 +88,25 @@ def test_list_episode_uses_first_element():
     ):
         g = guess(Path("X.mkv"))
     assert g.episode == 3
+
+
+def test_title_from_parent_dir():
+    """Bare episode filename gets title from the season-pack parent folder."""
+    p = Path("Futurama.S12.1080p.x265-ELiTE") / "S12E01.mkv"
+    g = guess(p)
+    assert g.title == "Futurama"
+    assert g.episode == 1
+
+
+def test_season_from_parent_dir():
+    """Season number falls back to parent dir when the filename omits it."""
+    p = Path("Futurama.S12.1080p.x265-ELiTE") / "E03.mkv"
+    g = guess(p)
+    assert g.season == 12
+
+
+def test_year_from_parent_dir():
+    """Year falls back to parent dir when the filename omits it."""
+    p = Path("Blade.Runner.2049.2017.UHD") / "Blade.Runner.2049.mkv"
+    g = guess(p)
+    assert g.year == 2017

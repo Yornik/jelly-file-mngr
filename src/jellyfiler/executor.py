@@ -13,13 +13,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.console import Console
+from rich.table import Table
 
-from jellyfiler.models import Plan, PlannedMove
+from jellyfiler.models import MediaType, Plan, PlannedMove
 
 if TYPE_CHECKING:
     from jellyfiler.cache import Cache
 
 console = Console()
+
+_TYPE_ICON = {
+    MediaType.MOVIE: "🎬",
+    MediaType.EPISODE: "📺",
+    MediaType.UNKNOWN: "?",
+}
 
 
 class ExecutionError(Exception):
@@ -47,7 +54,12 @@ def _preflight(moves: list[PlannedMove]) -> list[str]:
     return problems
 
 
-def execute(plan: Plan, dry_run: bool = True, cache: "Cache | None" = None) -> None:
+def execute(
+    plan: Plan,
+    dry_run: bool = True,
+    cache: "Cache | None" = None,
+    source_root: Path | None = None,
+) -> None:
     """Execute the plan.
 
     In dry-run mode (default) nothing is touched — the plan is printed only.
@@ -65,7 +77,7 @@ def execute(plan: Plan, dry_run: bool = True, cache: "Cache | None" = None) -> N
         console.print("\n[bold red]LIVE RUN — files will be moved[/bold red]\n")
 
     # Always show the full plan
-    _print_plan(plan)
+    _print_plan(plan, source_root)
 
     if dry_run:
         console.print(
@@ -116,21 +128,36 @@ def execute(plan: Plan, dry_run: bool = True, cache: "Cache | None" = None) -> N
         raise ExecutionError(f"{failed} file(s) failed to move. Check output above.")
 
 
-def _print_plan(plan: Plan) -> None:
-    from rich.table import Table
+def _short_dest(dest: Path, source_root: Path | None) -> str:
+    """Return a compact destination: Show/Season/file.ext or Movie (Year)/file.ext."""
+    parts = dest.parts
+    # Show last 3 parts (show/season/file or movie-folder/file) if deep enough
+    if len(parts) >= 3:
+        return str(Path(*parts[-3:]))
+    if len(parts) >= 2:
+        return str(Path(*parts[-2:]))
+    return dest.name
 
-    table = Table(title="Move plan", show_lines=False)
-    table.add_column("Source", style="cyan", no_wrap=False)
-    table.add_column("Destination", style="green", no_wrap=False)
-    table.add_column("Match", style="white")
-    table.add_column("Conf", style="yellow")
+
+def _print_plan(plan: Plan, source_root: Path | None = None) -> None:
+    table = Table(title="Move plan", show_lines=False, expand=False)
+    table.add_column("", width=2, no_wrap=True)
+    table.add_column("Source file", style="cyan", no_wrap=False, max_width=40)
+    table.add_column("Destination", style="green", no_wrap=False, max_width=50)
+    table.add_column("TMDB match", style="white", max_width=30)
+    table.add_column("Conf", style="dim", width=5, no_wrap=True)
 
     for move in plan.moves:
+        icon = _TYPE_ICON.get(move.media_type, "?")
+        conf_style = (
+            "[bold green]high[/bold green]" if move.confidence == "high" else "[yellow]low[/yellow]"
+        )
         table.add_row(
-            str(move.source),
-            str(move.destination),
+            icon,
+            move.source.name,
+            _short_dest(move.destination, source_root),
             move.matched_title,
-            move.confidence,
+            conf_style,
         )
 
     console.print(table)

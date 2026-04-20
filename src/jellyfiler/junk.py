@@ -5,9 +5,10 @@ Junk files are files that are clearly not the main media content:
 - Sample and trailer files
 - Hash-named files (e.g. 8fa41b40995c44c9a883b1e0fe62f16a.mkv)
 - Non-media files dropped by torrent clients (.nfo, .txt, .sfv, etc.)
+- Files inside junk subdirectories (Featurettes/, Extras/, Fake Endings/, etc.)
 
 In dry-run mode junk files are reported without being moved.
-With --apply they are moved to dest/_Junk/<relative-path-from-source>/filename.
+With --apply they are moved to dest/.junk/<relative-path-from-source>/filename.
 """
 
 import re
@@ -64,9 +65,38 @@ _VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".ts", ".vo
 
 _JUNK_DIR_NAME = ".junk"
 
+# Parent directory names that mark all contents as extras/junk regardless of filename.
+_JUNK_DIR_NAMES = re.compile(
+    r"""
+    (?ix)
+    ^samples?$
+    | ^screens?$
+    | ^screenshots?$
+    | ^featurettes?$
+    | ^extras?$
+    | ^bonus$
+    | ^specials?$
+    | ^trailers?$
+    | ^behind\ the\ scenes$
+    | ^deleted\ scenes?$
+    | ^interviews?$
+    | ^bloopers?$
+    | ^fake\ endings?$
+    | ^shorts?$
+    | ^promos?$
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
 
 def is_junk(path: Path) -> bool:
-    """Return True if path is almost certainly a junk file."""
+    """Return True if path is almost certainly a junk file.
+
+    Checks (in order):
+    1. Non-video sidecar extension (.nfo, .jpg, etc.)
+    2. Video stem matches known junk patterns (sample, trailer, hex hash…)
+    3. Any parent directory name matches junk folder patterns (Featurettes/, Extras/…)
+    """
     suffix = path.suffix.lower()
     stem = path.stem
 
@@ -81,7 +111,8 @@ def is_junk(path: Path) -> bool:
         if _HEX_HASH.match(stem):
             return True
 
-    return False
+    # Check parent directory names — catches Featurettes/Zombie Meat.mkv etc.
+    return any(_JUNK_DIR_NAMES.match(parent.name) for parent in path.parents)
 
 
 def find_junk(root: Path) -> list[Path]:
@@ -90,9 +121,9 @@ def find_junk(root: Path) -> list[Path]:
 
 
 def junk_destination(file: Path, source_root: Path, dest_root: Path) -> Path:
-    """Return the path where *file* would land in the _Junk quarantine dir.
+    """Return the path where *file* would land in the .junk quarantine dir.
 
-    Structure: dest_root/_Junk/<relative-subdir-from-source-root>/filename
+    Structure: dest_root/.junk/<relative-subdir-from-source-root>/filename
     """
     try:
         rel = file.relative_to(source_root)
@@ -117,7 +148,7 @@ def report_junk(junk_files: list[Path], source_root: Path, dest_root: Path, dry_
 
 
 def move_junk(junk_files: list[Path], source_root: Path, dest_root: Path) -> tuple[int, int]:
-    """Move junk files into dest_root/_Junk preserving relative structure.
+    """Move junk files into dest_root/.junk preserving relative structure.
 
     Returns (moved, failed) counts.
     """

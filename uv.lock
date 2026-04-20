@@ -245,6 +245,7 @@ dependencies = [
     { name = "httpx" },
     { name = "rich" },
     { name = "typer" },
+    { name = "wordninja" },
 ]
 
 [package.dev-dependencies]
@@ -262,6 +263,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "rich", specifier = ">=13" },
     { name = "typer", specifier = ">=0.12" },
+    { name = "wordninja", specifier = ">=2.0.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -667,3 +669,9 @@ sdist = { url = "https://files.pythonhosted.org/packages/c7/24/5f1b3bdffd70275f6
 wheels = [
     { url = "https://files.pythonhosted.org/packages/39/08/aaaad47bc4e9dc8c725e68f9d04865dbcb2052843ff09c97b08904852d84/urllib3-2.6.3-py3-none-any.whl", hash = "sha256:bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4", size = 131584, upload-time = "2026-01-07T16:24:42.685Z" },
 ]
+
+[[package]]
+name = "wordninja"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/15/abe4af50f4be92b60c25e43c1c64d08453b51e46c32981d80b3aebec0260/wordninja-2.0.0.tar.gz", hash = "sha256:1a1cc7ec146ad19d6f71941ee82aef3d31221700f0d8bf844136cf8df79d281a", size = 541572, upload-time = "2019-08-10T02:16:54.944Z" }

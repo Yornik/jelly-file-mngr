@@ -120,6 +120,63 @@ def test_is_not_junk_unknown_extension():
 
 
 # ---------------------------------------------------------------------------
+# is_junk — parent directory name detection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "parent",
+    [
+        "Sample",
+        "Samples",
+        "sample",
+        "Screen",
+        "Screens",
+        "Screenshots",
+        "Featurettes",
+        "Featurette",
+        "Extras",
+        "Extra",
+        "Bonus",
+        "Trailers",
+        "Trailer",
+        "Behind the Scenes",
+        "Deleted Scenes",
+        "Deleted Scene",
+        "Interviews",
+        "Interview",
+        "Bloopers",
+        "Fake Endings",
+        "Fake Ending",
+        "Shorts",
+        "Short",
+        "Promos",
+        "Specials",
+    ],
+)
+def test_junk_by_parent_dir(tmp_path, parent):
+    junk_dir = tmp_path / parent
+    junk_dir.mkdir()
+    f = junk_dir / "something.mkv"
+    assert is_junk(f)
+
+
+def test_real_file_in_normal_dir_not_junk(tmp_path):
+    d = tmp_path / "Futurama Season 12"
+    d.mkdir()
+    f = d / "Futurama.S12E01.mkv"
+    assert not is_junk(f)
+
+
+def test_junk_nested_deep(tmp_path):
+    """File deep inside a Featurettes folder is caught regardless of nesting."""
+    nested = tmp_path / "Movie (2009)" / "Featurettes" / "The Movie" / "Fake Endings"
+    nested.mkdir(parents=True)
+    f = nested / "Zombie Meat.mkv"
+    assert is_junk(f)
+
+
+# ---------------------------------------------------------------------------
 # find_junk
 # ---------------------------------------------------------------------------
 
