@@ -52,3 +52,62 @@ def test_cache_dir_created(tmp_path: Path) -> None:
     cache = Cache(db_path=deep)
     assert deep.exists()
     cache.close()
+
+
+# ── Pinned choices ────────────────────────────────────────────────────────────
+
+
+def _match(tmdb_id: int = 1, title: str = "Coco", year: int = 2017) -> TmdbMatch:
+    return TmdbMatch(tmdb_id=tmdb_id, title=title, year=year, media_type=MediaType.MOVIE)
+
+
+def test_pinned_miss(tmp_path: Path) -> None:
+    cache = _make_cache(tmp_path)
+    assert cache.get_pinned("coco", 2017, MediaType.MOVIE) is None
+
+
+def test_pinned_roundtrip(tmp_path: Path) -> None:
+    cache = _make_cache(tmp_path)
+    m = _match()
+    cache.set_pinned("coco", 2017, MediaType.MOVIE, m)
+
+    result = cache.get_pinned("coco", 2017, MediaType.MOVIE)
+    assert result is not None
+    assert result.tmdb_id == 1
+    assert result.title == "Coco"
+    assert result.year == 2017
+
+
+def test_pinned_case_insensitive(tmp_path: Path) -> None:
+    cache = _make_cache(tmp_path)
+    cache.set_pinned("Coco", 2017, MediaType.MOVIE, _match())
+    assert cache.get_pinned("coco", 2017, MediaType.MOVIE) is not None
+
+
+def test_pinned_overwrites(tmp_path: Path) -> None:
+    cache = _make_cache(tmp_path)
+    cache.set_pinned("coco", 2017, MediaType.MOVIE, _match(tmdb_id=1, title="Coco"))
+    cache.set_pinned("coco", 2017, MediaType.MOVIE, _match(tmdb_id=99, title="Coco 2"))
+
+    result = cache.get_pinned("coco", 2017, MediaType.MOVIE)
+    assert result is not None
+    assert result.tmdb_id == 99
+
+
+def test_pinned_year_none(tmp_path: Path) -> None:
+    cache = _make_cache(tmp_path)
+    m = TmdbMatch(tmdb_id=5, title="Danny Phantom", year=2004, media_type=MediaType.EPISODE)
+    cache.set_pinned("danny phantom", None, MediaType.EPISODE, m)
+
+    result = cache.get_pinned("danny phantom", None, MediaType.EPISODE)
+    assert result is not None
+    assert result.tmdb_id == 5
+
+
+def test_pinned_separate_from_tmdb_cache(tmp_path: Path) -> None:
+    cache = _make_cache(tmp_path)
+    m = _match()
+    cache.set_pinned("coco", 2017, MediaType.MOVIE, m)
+
+    # tmdb_cache should still be empty
+    assert cache.get_tmdb("coco", 2017, MediaType.MOVIE) is None
