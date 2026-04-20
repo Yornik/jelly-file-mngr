@@ -8,7 +8,11 @@ from jellyfiler.models import GuessedMedia, MediaType
 
 
 def _clean_title(title: str) -> str:
-    return " ".join(title.split()).strip()
+    title = " ".join(title.split()).strip()
+    # All-caps titles (e.g. "DANNY PHANTOM") confuse some APIs — normalize to title case
+    if title and title == title.upper() and title.replace(" ", "").isalpha():
+        title = title.title()
+    return title
 
 
 def _parse_name(name: str) -> dict:
