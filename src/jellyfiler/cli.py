@@ -43,11 +43,30 @@ def _get_tmdb_client() -> TmdbClient:
 
 
 _ROMAN_SUFFIX = re.compile(r"\s+[IVXLCDM]+$", re.IGNORECASE)
+# CamelCase / run-together words: "wonderwoman" → "wonder woman"
+_CAMEL_SPLIT = re.compile(r"(?<=[a-z])(?=[A-Z])")
 
 
 def _strip_roman_suffix(title: str) -> str:
     """Strip a trailing Roman numeral from a title ('Superman I' → 'Superman')."""
     return _ROMAN_SUFFIX.sub("", title).strip()
+
+
+def _title_variants(title: str) -> list[str]:
+    """Return alternative search strings to try when the canonical title misses."""
+    variants: list[str] = []
+    # Strip trailing Roman numeral: "Superman I" → "Superman"
+    stripped = _strip_roman_suffix(title)
+    if stripped != title:
+        variants.append(stripped)
+    # Replace & with 'and': "Superman & Batman" → "Superman and Batman"
+    if "&" in title:
+        variants.append(title.replace("&", "and").replace("  ", " ").strip())
+    # Split CamelCase / run-together words: "wonderwoman" → "wonder woman"
+    spaced = _CAMEL_SPLIT.sub(" ", title)
+    if spaced != title:
+        variants.append(spaced)
+    return variants
 
 
 def _resolve_match(
@@ -375,21 +394,21 @@ def organize(
                 progress.advance(task)
                 continue
 
-            # Retry with Roman numeral stripped if initial search had no confident hit
+            # Retry with title variants if no confident match on first search
             search_title = guessed.title
             if not best_match(matches, guessed.title, guessed.year):
-                stripped = _strip_roman_suffix(guessed.title)
-                if stripped != guessed.title:
+                for variant in _title_variants(guessed.title):
                     try:
                         retry = (
-                            tmdb.search_movie(stripped, guessed.year)
+                            tmdb.search_movie(variant, guessed.year)
                             if guessed.media_type == MediaType.MOVIE
-                            else tmdb.search_tv(stripped, None)
+                            else tmdb.search_tv(variant, None)
                         )
-                        if retry:
+                        if retry and best_match(retry, variant, guessed.year):
                             matches = retry
-                            search_title = stripped
-                            cache.set_tmdb(stripped, _cache_year, guessed.media_type, retry)
+                            search_title = variant
+                            cache.set_tmdb(variant, _cache_year, guessed.media_type, retry)
+                            break
                     except Exception:
                         pass
 

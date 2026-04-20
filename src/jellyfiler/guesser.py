@@ -1,14 +1,22 @@
 """Parse messy torrent/release filenames using guessit."""
 
+import re
 from pathlib import Path
 
 import guessit
 
 from jellyfiler.models import GuessedMedia, MediaType
 
+# Leading single-char sort prefixes: "b. Superman II" → "Superman II"
+_LEADING_PREFIX = re.compile(r"^[a-zA-Z]\.\s+")
+# Quality residue guessit sometimes leaves in titles: "ghostbusters 720bd" → "ghostbusters"
+_QUALITY_RESIDUE = re.compile(r"\s+\d{3,4}[bBpP][dD]?\b.*$")
+
 
 def _clean_title(title: str) -> str:
     title = " ".join(title.split()).strip()
+    title = _LEADING_PREFIX.sub("", title).strip()
+    title = _QUALITY_RESIDUE.sub("", title).strip()
     # All-caps titles (e.g. "DANNY PHANTOM") confuse some APIs — normalize to title case
     if title and title == title.upper() and title.replace(" ", "").isalpha():
         title = title.title()
