@@ -288,16 +288,20 @@ def organize(
                     continue
 
             # TMDB lookup — SQLite cache first, then API
+            # For TV shows the cache key always uses year=None (we never filter by year).
+            _cache_year = guessed.year if guessed.media_type == MediaType.MOVIE else None
             try:
-                cached = cache.get_tmdb(guessed.title, guessed.year, guessed.media_type)
+                cached = cache.get_tmdb(guessed.title, _cache_year, guessed.media_type)
                 if cached is not None:
                     matches = cached
                 elif guessed.media_type == MediaType.MOVIE:
                     matches = tmdb.search_movie(guessed.title, guessed.year)
                     cache.set_tmdb(guessed.title, guessed.year, guessed.media_type, matches)
                 else:
-                    matches = tmdb.search_tv(guessed.title, guessed.year)
-                    cache.set_tmdb(guessed.title, guessed.year, guessed.media_type, matches)
+                    # Never pass year for TV — TMDB's first_air_date_year is the
+                    # show's premiere year, which never matches a season folder year.
+                    matches = tmdb.search_tv(guessed.title, None)
+                    cache.set_tmdb(guessed.title, None, guessed.media_type, matches)
                 _tmdb_consecutive_server_errors = 0  # reset on success
 
             except httpx.HTTPStatusError as exc:
@@ -362,9 +366,13 @@ def organize(
                 progress.advance(task)
                 continue
 
+            if interactive:
+                progress.stop()
             match = _resolve_match(
                 file, guessed.title, guessed.year, matches, guessed.media_type, interactive
             )
+            if interactive:
+                progress.start()
 
             # AniList fallback: if TMDB missed and this looks like anime, try AniList
             if (
