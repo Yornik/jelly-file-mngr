@@ -28,17 +28,19 @@ uv run mypy src/
 The pipeline runs entirely in `cli.py::organize()` and is strictly linear — each stage hands off to the next with no back-references:
 
 ```
-scanner → guesser → [junk filter] → tmdb/anilist lookup → planner → executor
+scanner → guesser → [junk filter] → pinned-cache check → tmdb/anilist lookup → planner → executor
 ```
 
 **Data flow through the main loop:**
 1. `scanner.find_media_files(source)` — rglob for video extensions
 2. `junk.is_junk(file)` — checked before anything else; junk files are moved to `dest/.junk/<relative-path>` and never enter the TMDB flow
-3. `guesser.guess(file)` → `GuessedMedia` (title, year, season, episode, media_type via guessit)
-4. Cache-first TMDB lookup via `cache.get_tmdb()` / `tmdb.search_movie()` / `tmdb.search_tv()`; AniList is a fallback for episodes that look like anime
-5. `_resolve_match()` calls `tmdb.best_match()` then optionally `interactive.prompt_tmdb_match()` on ambiguity
-6. `planner.plan_move()` → `PlannedMove` with the computed Jellyfin destination path
-7. `executor.execute()` runs preflight checks then `shutil.move()` per file
+3. `guesser.guess(file)` → `GuessedMedia` (title, year, season, episode, media_type via guessit + parent-dir fallback)
+4. `cache.get_pinned()` — if a user previously confirmed a match interactively, use it directly and skip TMDB entirely
+5. Cache-first TMDB lookup via `cache.get_tmdb()` / `tmdb.search_movie()` / `tmdb.search_tv()`; AniList is a fallback for episodes that look like anime
+6. Title variant retries (Roman numeral strip, `&`→`and`, word segmentation via wordninja) when `best_match` fails
+7. `_resolve_match()` calls `tmdb.best_match()` then optionally `interactive.prompt_tmdb_match()` on ambiguity; confirmed match is saved via `cache.set_pinned()`
+8. `planner.plan_move()` → `PlannedMove` with the computed Jellyfin destination path
+9. `executor.execute()` runs preflight checks then `shutil.move()` per file
 
 **Key dataclasses** (`models.py`):
 - `GuessedMedia` — guessit output normalised
@@ -52,10 +54,36 @@ scanner → guesser → [junk filter] → tmdb/anilist lookup → planner → ex
 - Junk quarantine: `dest/.junk/<relative-from-source>/filename` (dot-prefix so Jellyfin ignores it)
 
 **SQLite cache** (`cache.py`, `~/.cache/jellyfiler/cache.db`):
-- `tmdb_cache` — keyed on `(title.lower(), year, media_type)`; stores JSON-serialised `list[TmdbMatch]`
+- `tmdb_cache` — keyed on `(title.lower(), year, media_type)`; stores JSON-serialised `list[TmdbMatch]`. TV shows always use `year=None` as the key (TMDB's `first_air_date_year` is the premiere year, not the season year).
+- `tmdb_pinned` — keyed on `(title.lower(), year, media_type)`; stores the single `TmdbMatch` the user confirmed. Checked before TMDB lookup — if present, skips API call and prompt entirely.
 - `move_log` — records every successful move; checked at loop start to skip already-moved files
 
 **Executor safety model** (`executor.py`): preflight checks run before any file is touched — missing source, existing destination, duplicate destinations all abort the entire run. No partial moves.
+
+## Known library state (as of Apr 2026)
+
+**SMB share:** `/mnt/smbshare/shared_evreyone/` — mounted with `uid=0` by default (needs remount with `uid=1000` to write from WSL). Mount command:
+```bash
+sudo umount /mnt/smbshare
+sudo mount -t cifs //192.168.1.42/lilnasx /mnt/smbshare -o username=yornik,uid=1000,gid=1000,file_mode=0755,dir_mode=0755
+```
+
+**The Land Before Time collection** (`movies/The Land Before Time. Collection/`):
+- Files have been renamed from Russian to English (14 films)
+- Films I–III, XI, XIV have English + Russian audio; IV–X, XII–XIII are Russian-only dubs — need better rips for English audio on those
+
+**Active PR:** `feat/junk-collector` — not yet merged to main. Contains: junk collector, parent-dir junk detection, smarter guesser (parent-dir title/season fallback), TMDB circuit breaker, progress bar, plan table UX, summary panel, title normalization fixes, pinned cache.
+
+## Title parsing quirks to know about
+
+- **All-caps titles** (`DANNY PHANTOM`) — normalized to title case in `_clean_title` before TMDB search
+- **Sort prefixes** (`b. Superman II`) — lowercase consonant prefix stripped in `_clean_title`
+- **Quality residue** (`ghostbusters 720bd`) — trailing `\d{3,4}[bBpP]` stripped in `_clean_title`
+- **Roman numeral suffix** (`Superman I`) — stripped in `_title_variants` retry; only fires when first search fails
+- **Ampersand** (`Superman & Batman`) — retried as `and` in `_title_variants`
+- **Run-together words** (`wonderwoman`) — wordninja splits single all-lowercase words in `_title_variants`
+- **Accented titles** (`Pokémon`) — `_norm()` in `tmdb.best_match` strips combining characters before comparison
+- **TV year filter** — never passed to `search_tv()`; season folder years (e.g. `Season 2 (2005-06)`) don't match TMDB's `first_air_date_year`
 
 ## Adding a new feature
 
@@ -63,3 +91,4 @@ scanner → guesser → [junk filter] → tmdb/anilist lookup → planner → ex
 - New persistent data needs a new column or table in `cache.py::_SCHEMA`.
 - `cli.py` imports everything explicitly — new modules need wiring there.
 - Coverage threshold is 30% (set in `pyproject.toml`). Running only a new test file in isolation will fail the coverage gate even if all tests pass — run `uv run pytest` to check overall coverage.
+- Use `pytest` fixture pattern for `Cache` tests (yield + close) to avoid `ResourceWarning` on unclosed SQLite connections.
