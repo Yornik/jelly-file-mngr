@@ -322,9 +322,20 @@ def organize(
                     progress.advance(task)
                     continue
 
-            # TMDB lookup — SQLite cache first, then API
             # For TV shows the cache key always uses year=None (we never filter by year).
             _cache_year = guessed.year if guessed.media_type == MediaType.MOVIE else None
+
+            # Check for a previously pinned interactive choice — skip TMDB entirely
+            pinned = cache.get_pinned(guessed.title, _cache_year, guessed.media_type)
+            if pinned:
+                console.print(
+                    f"[dim]PINNED:[/dim] {guessed.title} → {pinned.title} ({pinned.year})"
+                )
+                planned_moves.append(plan_move(guessed, pinned, dest, file))
+                progress.advance(task)
+                continue
+
+            # TMDB lookup — SQLite cache first, then API
             try:
                 cached = cache.get_tmdb(guessed.title, _cache_year, guessed.media_type)
                 if cached is not None:
@@ -485,6 +496,10 @@ def organize(
             planned_moves.append(plan_move(guessed, match, dest, file))
             if interactive and match is None and not matches:
                 progress.start()
+
+            # Pin confirmed match so future runs skip the prompt
+            if match:
+                cache.set_pinned(search_title, _cache_year, guessed.media_type, match)
 
             progress.advance(task)
 
