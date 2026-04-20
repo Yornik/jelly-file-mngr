@@ -1,6 +1,5 @@
 """Tests for media file scanning."""
 
-
 import pytest
 
 from jellyfiler.scanner import find_media_files, find_top_level_items

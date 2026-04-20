@@ -10,23 +10,27 @@ from jellyfiler.junk import find_junk, is_junk, junk_destination, move_junk, rep
 # is_junk — non-video sidecar extensions
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("filename", [
-    "movie.nfo",
-    "release.txt",
-    "archive.sfv",
-    "checksum.md5",
-    "cover.jpg",
-    "cover.jpeg",
-    "fanart.png",
-    "thumb.bmp",
-    "banner.gif",
-    "subtitle.sub",
-    "subtitle.idx",
-    "release.srr",
-    "link.url",
-    "readme.htm",
-    "readme.html",
-])
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "movie.nfo",
+        "release.txt",
+        "archive.sfv",
+        "checksum.md5",
+        "cover.jpg",
+        "cover.jpeg",
+        "fanart.png",
+        "thumb.bmp",
+        "banner.gif",
+        "subtitle.sub",
+        "subtitle.idx",
+        "release.srr",
+        "link.url",
+        "readme.htm",
+        "readme.html",
+    ],
+)
 def test_is_junk_sidecar_extensions(filename):
     assert is_junk(Path(filename))
 
@@ -35,27 +39,31 @@ def test_is_junk_sidecar_extensions(filename):
 # is_junk — video files with junk stem patterns
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("filename", [
-    "Sample.mkv",
-    "sample.mp4",
-    "SAMPLE.avi",
-    "Trailer.mkv",
-    "trailer.mp4",
-    "RARBG.com.mp4",
-    "RARBG.com.mkv",
-    "rarbg.info.mp4",
-    "RARBG.mkv",
-    "etrg.mp4",
-    "www.YTS.AM.mp4",
-    "Featurette.mkv",
-    "Deleted.Scenes.mkv",
-    "deleted_scenes.mkv",
-    "Behind.The.Scenes.mkv",
-    "behind-the-scenes.mkv",
-    "Interview.mkv",
-    "Short.Film.mkv",
-    "Scene.mkv",
-])
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "Sample.mkv",
+        "sample.mp4",
+        "SAMPLE.avi",
+        "Trailer.mkv",
+        "trailer.mp4",
+        "RARBG.com.mp4",
+        "RARBG.com.mkv",
+        "rarbg.info.mp4",
+        "RARBG.mkv",
+        "etrg.mp4",
+        "www.YTS.AM.mp4",
+        "Featurette.mkv",
+        "Deleted.Scenes.mkv",
+        "deleted_scenes.mkv",
+        "Behind.The.Scenes.mkv",
+        "behind-the-scenes.mkv",
+        "Interview.mkv",
+        "Short.Film.mkv",
+        "Scene.mkv",
+    ],
+)
 def test_is_junk_video_stem_patterns(filename):
     assert is_junk(Path(filename))
 
@@ -64,12 +72,16 @@ def test_is_junk_video_stem_patterns(filename):
 # is_junk — hex hash filenames
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("filename", [
-    "8fa41b40995c44c9a883b1e0fe62f16a.mkv",        # 32-char MD5 hash
-    "deadbeefcafebabe0123456789abcdef.mp4",          # 32-char hex
-    "abcdef0123456789.mkv",                           # exactly 16 chars (boundary)
-    "ABCDEF0123456789.mkv",                           # uppercase hex
-])
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "8fa41b40995c44c9a883b1e0fe62f16a.mkv",  # 32-char MD5 hash
+        "deadbeefcafebabe0123456789abcdef.mp4",  # 32-char hex
+        "abcdef0123456789.mkv",  # exactly 16 chars (boundary)
+        "ABCDEF0123456789.mkv",  # uppercase hex
+    ],
+)
 def test_is_junk_hex_hash(filename):
     assert is_junk(Path(filename))
 
@@ -78,17 +90,21 @@ def test_is_junk_hex_hash(filename):
 # is_junk — real media files should NOT be junk
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("filename", [
-    "Blade.Runner.2049.2017.2160p.UHD.BluRay.REMUX.mkv",
-    "Futurama.S12E03.1080p.x265-ELiTE.mkv",
-    "The.Dark.Knight.2008.IMAX.4K.mkv",
-    "Karate.Kid.Legends.2025.mkv",
-    "How.to.Train.Your.Dragon.The.Hidden.World.mkv",
-    # hex-looking but too short (15 chars)
-    "abcdef012345678.mkv",
-    # stem with non-hex chars
-    "abcdefg0123456789.mkv",
-])
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "Blade.Runner.2049.2017.2160p.UHD.BluRay.REMUX.mkv",
+        "Futurama.S12E03.1080p.x265-ELiTE.mkv",
+        "The.Dark.Knight.2008.IMAX.4K.mkv",
+        "Karate.Kid.Legends.2025.mkv",
+        "How.to.Train.Your.Dragon.The.Hidden.World.mkv",
+        # hex-looking but too short (15 chars)
+        "abcdef012345678.mkv",
+        # stem with non-hex chars
+        "abcdefg0123456789.mkv",
+    ],
+)
 def test_is_not_junk_real_files(filename):
     assert not is_junk(Path(filename))
 
@@ -96,6 +112,7 @@ def test_is_not_junk_real_files(filename):
 # ---------------------------------------------------------------------------
 # is_junk — unknown/non-media extensions are not flagged as junk video
 # ---------------------------------------------------------------------------
+
 
 def test_is_not_junk_unknown_extension():
     # .xyz is not a video extension and not a known sidecar — should not be junk
@@ -105,6 +122,7 @@ def test_is_not_junk_unknown_extension():
 # ---------------------------------------------------------------------------
 # find_junk
 # ---------------------------------------------------------------------------
+
 
 def test_find_junk_returns_junk_files(tmp_path):
     (tmp_path / "Movie.mkv").touch()
@@ -151,6 +169,7 @@ def test_find_junk_returns_sorted(tmp_path):
 # junk_destination
 # ---------------------------------------------------------------------------
 
+
 def test_junk_destination_flat(tmp_path):
     source_root = tmp_path / "source"
     dest_root = tmp_path / "dest"
@@ -182,6 +201,7 @@ def test_junk_destination_file_outside_source(tmp_path):
 # ---------------------------------------------------------------------------
 # move_junk
 # ---------------------------------------------------------------------------
+
 
 def test_move_junk_moves_files(tmp_path):
     source = tmp_path / "source"
@@ -260,6 +280,7 @@ def test_move_junk_empty_list(tmp_path):
 # ---------------------------------------------------------------------------
 # report_junk
 # ---------------------------------------------------------------------------
+
 
 def test_report_junk_empty_list(tmp_path, capsys):
     report_junk([], tmp_path / "source", tmp_path / "dest", dry_run=True)

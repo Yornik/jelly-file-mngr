@@ -14,11 +14,12 @@ uv run pytest -k test_name              # single test by name
 
 uv run ruff check .                      # lint (run before every commit)
 uv run ruff check . --fix                # auto-fix fixable issues (import order etc.)
-uv run ruff format .
+uv run ruff format .                     # format (run before every commit)
+uv run ruff format --check .             # check formatting without changing files
 uv run mypy src/
 ```
 
-**Before committing:** always run `uv run ruff check .` — ruff enforces import ordering (I001) and will flag issues that `--fix` can auto-correct.
+**Before committing:** always run `uv run ruff check . && uv run ruff format .` — ruff enforces import ordering (I001) and formatting; both must be clean before committing.
 
 `TMDB_API_KEY` env var must be set to run the CLI. Tests do not hit the network.
 

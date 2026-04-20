@@ -58,6 +58,7 @@ def test_preflight_clean(tmp_path):
 # execute — dry-run
 # ---------------------------------------------------------------------------
 
+
 def test_execute_dry_run_does_not_move(tmp_path):
     src = tmp_path / "movie.mkv"
     dst = tmp_path / "output" / "movie.mkv"
@@ -94,6 +95,7 @@ def test_execute_dry_run_with_skipped_items(tmp_path):
 # ---------------------------------------------------------------------------
 # execute — live run
 # ---------------------------------------------------------------------------
+
 
 def test_execute_live_moves_file(tmp_path):
     src = tmp_path / "movie.mkv"
@@ -143,5 +145,8 @@ def test_execute_live_raises_on_move_failure(tmp_path):
     dst = tmp_path / "output" / "movie.mkv"
     src.touch()
     plan = Plan(moves=[_move(src, dst)])
-    with patch("jellyfiler.executor.shutil.move", side_effect=OSError("disk full")), pytest.raises(ExecutionError, match="failed to move"):
+    with (
+        patch("jellyfiler.executor.shutil.move", side_effect=OSError("disk full")),
+        pytest.raises(ExecutionError, match="failed to move"),
+    ):
         execute(plan, dry_run=False)

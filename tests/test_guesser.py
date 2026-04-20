@@ -55,24 +55,36 @@ def test_unknown_type():
 
 
 def test_list_title_uses_first_element():
-    with patch("jellyfiler.guesser.guessit.guessit", return_value={"type": "movie", "title": ["First", "Second"]}):
+    with patch(
+        "jellyfiler.guesser.guessit.guessit",
+        return_value={"type": "movie", "title": ["First", "Second"]},
+    ):
         g = guess(Path("X.mkv"))
     assert g.title == "First"
 
 
 def test_list_year_uses_first_element():
-    with patch("jellyfiler.guesser.guessit.guessit", return_value={"type": "movie", "title": "Movie", "year": [2020, 2021]}):
+    with patch(
+        "jellyfiler.guesser.guessit.guessit",
+        return_value={"type": "movie", "title": "Movie", "year": [2020, 2021]},
+    ):
         g = guess(Path("X.mkv"))
     assert g.year == 2020
 
 
 def test_list_season_uses_first_element():
-    with patch("jellyfiler.guesser.guessit.guessit", return_value={"type": "episode", "title": "Show", "season": [1, 2], "episode": 1}):
+    with patch(
+        "jellyfiler.guesser.guessit.guessit",
+        return_value={"type": "episode", "title": "Show", "season": [1, 2], "episode": 1},
+    ):
         g = guess(Path("X.mkv"))
     assert g.season == 1
 
 
 def test_list_episode_uses_first_element():
-    with patch("jellyfiler.guesser.guessit.guessit", return_value={"type": "episode", "title": "Show", "season": 1, "episode": [3, 4]}):
+    with patch(
+        "jellyfiler.guesser.guessit.guessit",
+        return_value={"type": "episode", "title": "Show", "season": 1, "episode": [3, 4]},
+    ):
         g = guess(Path("X.mkv"))
     assert g.episode == 3

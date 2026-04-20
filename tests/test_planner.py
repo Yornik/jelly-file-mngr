@@ -68,7 +68,13 @@ def test_episode_destination_pads_single_digit():
 # plan_move
 # ---------------------------------------------------------------------------
 
-def _guessed(media_type: MediaType, title: str = "Test", season: int | None = None, episode: int | None = None) -> GuessedMedia:
+
+def _guessed(
+    media_type: MediaType,
+    title: str = "Test",
+    season: int | None = None,
+    episode: int | None = None,
+) -> GuessedMedia:
     return GuessedMedia(
         source_path=Path(f"{title}.mkv"),
         media_type=media_type,
@@ -115,6 +121,7 @@ def test_plan_move_unknown_type_is_skipped():
 # build_plan
 # ---------------------------------------------------------------------------
 
+
 def _planned_move(skipped: bool = False) -> PlannedMove:
     return PlannedMove(
         source=Path("src.mkv"),
@@ -145,6 +152,7 @@ def test_build_plan_empty():
 # ---------------------------------------------------------------------------
 # Plan.total
 # ---------------------------------------------------------------------------
+
 
 def test_plan_total():
     plan = Plan(
