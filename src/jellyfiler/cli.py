@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 import typer
 from rich.console import Console
 
@@ -160,6 +161,8 @@ def organize(
     planned_moves: list[PlannedMove] = []
     junk_files: list[Path] = []
     tmdb_errors = 0
+    _tmdb_consecutive_server_errors = 0
+    _TMDB_CIRCUIT_BREAK = 3
     cache = Cache(cache_db)
     console.print(f"[dim]Cache: {cache_db}[/dim]")
 
@@ -244,6 +247,48 @@ def organize(
             else:
                 matches = tmdb.search_tv(guessed.title, guessed.year)
                 cache.set_tmdb(guessed.title, guessed.year, guessed.media_type, matches)
+            _tmdb_consecutive_server_errors = 0  # reset on success
+
+        except httpx.HTTPStatusError as exc:
+            is_server_error = exc.response.status_code >= 500
+            err_console.print(
+                f"[red]TMDB error for '{file.name}': {exc.response.status_code} {exc.response.reason_phrase}[/red]"
+            )
+            tmdb_errors += 1
+            if is_server_error:
+                _tmdb_consecutive_server_errors += 1
+                if _tmdb_consecutive_server_errors >= _TMDB_CIRCUIT_BREAK:
+                    err_console.print(
+                        f"\n[bold red]TMDB is returning server errors — stopping after "
+                        f"{_tmdb_consecutive_server_errors} consecutive failures. "
+                        "Try again later.[/bold red]"
+                    )
+                    planned_moves.append(
+                        PlannedMove(
+                            source=file,
+                            destination=dest,
+                            media_type=guessed.media_type,
+                            tmdb_id=None,
+                            matched_title=guessed.title,
+                            confidence="low",
+                            skipped=True,
+                            skip_reason=f"TMDB server error: {exc.response.status_code}",
+                        )
+                    )
+                    break
+            planned_moves.append(
+                PlannedMove(
+                    source=file,
+                    destination=dest,
+                    media_type=guessed.media_type,
+                    tmdb_id=None,
+                    matched_title=guessed.title,
+                    confidence="low",
+                    skipped=True,
+                    skip_reason=f"TMDB HTTP error: {exc.response.status_code}",
+                )
+            )
+            continue
 
         except Exception as exc:
             err_console.print(f"[red]TMDB error for '{file.name}': {exc}[/red]")
