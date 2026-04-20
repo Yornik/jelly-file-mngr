@@ -29,7 +29,13 @@ output/
     Season 12/
       S12E01.mkv
       S12E02.mkv
+  .junk/
+    Futurama.S12.1080p.x265-ELiTE/
+      Sample.mkv
+      release.nfo
 ```
+
+Junk files (samples, trailers, sidecar files, hash-named files, scene promo videos) are automatically detected and quarantined into a `.junk/` subdirectory in the destination — they never trigger a title-search prompt. The `.junk/` prefix is ignored by Jellyfin.
 
 ---
 
@@ -126,7 +132,7 @@ Override the location with `--cache-db /path/to/custom.db`.
 ## Safety guarantees
 
 - **Dry-run is the default.** You must pass `--apply` to move anything.
-- **Nothing is ever deleted.** Files are moved, never removed.
+- **Nothing is ever deleted.** Files are moved, never removed. Junk is quarantined to `.junk/`, not discarded.
 - **Nothing is ever overwritten.** If the destination already exists, the move is skipped.
 - **Pre-flight checks run before the first file is touched.** If any problem is found (missing source, duplicate destination) the entire operation aborts with a clear error message — no partial moves.
 - **Ambiguous matches are interactively resolved or skipped.** A wrong TMDB match is more dangerous than a skip. The tool defaults to asking you rather than guessing wrong.
