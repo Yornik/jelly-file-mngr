@@ -39,6 +39,8 @@ def guess(path: Path) -> GuessedMedia:
     year = int(year) if year else None
 
     season = result.get("season")
+    if isinstance(season, list):
+        season = season[0]
     season = int(season) if season else None
 
     episode = result.get("episode")

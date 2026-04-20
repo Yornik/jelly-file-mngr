@@ -17,8 +17,16 @@ def prompt_tmdb_match(
 ) -> TmdbMatch | None:
     """Show the user a list of TMDB results and ask them to pick one.
 
+    Auto-selects when there is exactly one result.
     Returns the chosen match, or None if the user skips.
     """
+    if len(matches) == 1:
+        console.print(
+            f"[dim]Auto-selected only match for '{guessed_title}': "
+            f"{matches[0].title} ({matches[0].year})[/dim]"
+        )
+        return matches[0]
+
     console.print(f"\n[bold yellow]Ambiguous match for:[/bold yellow] [cyan]{filename}[/cyan]")
     console.print(f"  guessit parsed title: [bold]{guessed_title}[/bold]")
     console.print(f"  media type: [bold]{media_type.value}[/bold]\n")
