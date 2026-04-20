@@ -24,11 +24,13 @@ def _clean_title(title: str) -> str:
     return title
 
 
-def _parse_name(name: str) -> dict:
+def _parse_name(name: str) -> dict[str, object]:
     return dict(guessit.guessit(name))
 
 
-def _extract(result: dict) -> tuple[MediaType, str, int | None, int | None, int | None]:
+def _extract(
+    result: dict[str, object],
+) -> tuple[MediaType, str, int | None, int | None, int | None]:
     raw_type = result.get("type", "unknown")
     if raw_type == "movie":
         media_type = MediaType.MOVIE
@@ -45,18 +47,15 @@ def _extract(result: dict) -> tuple[MediaType, str, int | None, int | None, int 
     year = result.get("year")
     if isinstance(year, list):
         year = year[0]
-    year = int(year) if year else None
-
+    year = int(year) if isinstance(year, (int, float, str)) and year else None
     season = result.get("season")
     if isinstance(season, list):
         season = season[0]
-    season = int(season) if season else None
-
+    season = int(season) if isinstance(season, (int, float, str)) and season else None
     episode = result.get("episode")
     if isinstance(episode, list):
         episode = episode[0]
-    episode = int(episode) if episode else None
-
+    episode = int(episode) if isinstance(episode, (int, float, str)) and episode else None
     return media_type, title, year, season, episode
 
 
@@ -99,6 +98,8 @@ def guess(path: Path) -> GuessedMedia:
         year=year,
         season=season,
         episode=episode,
-        episode_title=file_result.get("episode_title"),
+        episode_title=str(file_result["episode_title"])
+        if file_result.get("episode_title")
+        else None,
         raw_guess=file_result,
     )
