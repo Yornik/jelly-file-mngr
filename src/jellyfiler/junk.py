@@ -1,4 +1,15 @@
-"""Detect and quarantine junk files (samples, trailers, featurettes, hash dumps)."""
+"""Identify and quarantine junk files left by torrent releases.
+
+Junk files are files that are clearly not the main media content:
+- RARBG/ETRG/scene promo videos
+- Sample and trailer files
+- Hash-named files (e.g. 8fa41b40995c44c9a883b1e0fe62f16a.mkv)
+- Non-media files dropped by torrent clients (.nfo, .txt, .sfv, etc.)
+- Files inside junk subdirectories (Featurettes/, Extras/, Fake Endings/, etc.)
+
+In dry-run mode junk files are reported without being moved.
+With --apply they are moved to dest/.junk/<relative-path-from-source>/filename.
+"""
 
 import re
 import shutil
@@ -6,53 +17,55 @@ from pathlib import Path
 
 from rich.console import Console
 
+console = Console()
+
+# Video files whose names match these patterns are considered junk.
+# Match against the stem (filename without extension), case-insensitive.
+_JUNK_VIDEO_STEMS = re.compile(
+    r"^("
+    r"sample"
+    r"|trailer"
+    r"|rarbg[\. ]?(com|info)?"
+    r"|etrg"
+    r"|www\."
+    r"|featurette"
+    r"|deleted[\. _-]?scenes?"
+    r"|behind[\. _-]?the[\. _-]?scenes?"
+    r"|interview"
+    r"|short[\. _-]?film"
+    r"|scene"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# A file whose entire stem is a hex hash (MD5/SHA-like) is junk.
+_HEX_HASH = re.compile(r"^[0-9a-f]{16,}$", re.IGNORECASE)
+
+# Non-video extensions that torrent releases drop alongside the main file.
+_JUNK_EXTENSIONS = {
+    ".nfo",
+    ".txt",
+    ".sfv",
+    ".md5",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".gif",
+    ".sub",
+    ".idx",
+    ".srr",
+    ".url",
+    ".htm",
+    ".html",
+}
+
+# Video extensions — only these are checked against the name patterns.
+_VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".ts", ".vob"}
+
 _JUNK_DIR_NAME = ".junk"
 
-# File extensions that are never real media content
-_JUNK_EXTENSIONS: frozenset[str] = frozenset(
-    {
-        ".nfo",
-        ".txt",
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".bmp",
-        ".gif",
-        ".sfv",
-        ".md5",
-        ".nzb",
-        ".srr",
-        ".srs",
-        ".url",
-        ".lnk",
-        ".exe",
-        ".bat",
-        ".com",
-    }
-)
-
-# Stem patterns that indicate junk video files
-_JUNK_VIDEO_STEMS = re.compile(
-    r"""
-    (?ix)
-    ^sample                     # sample.mkv, Sample-720p.mkv
-    | -sample$                  # movie-sample.mkv
-    | \btrailer\b               # trailer, theatrical-trailer
-    | \bteaser\b
-    | \bfeaturette\b
-    | \binterview\b
-    | \bbehind.the.scenes\b
-    | \bdeleted.scene\b
-    | \bbloopers?\b
-    | \bbonus\b
-    | \bpromo\b
-    | ^RARBG                    # RARBG.com.mp4 promo files
-    | ^[0-9a-f]{16,}$           # pure hex hash filename
-    """,
-    re.VERBOSE | re.IGNORECASE,
-)
-
-# Parent directory names that mark all contents as junk/extras
+# Parent directory names that mark all contents as extras/junk regardless of filename.
 _JUNK_DIR_NAMES = re.compile(
     r"""
     (?ix)
@@ -64,11 +77,11 @@ _JUNK_DIR_NAMES = re.compile(
     | ^bonus$
     | ^specials?$
     | ^trailers?$
-    | ^behind.the.scenes$
-    | ^deleted.scenes?$
+    | ^behind\ the\ scenes$
+    | ^deleted\ scenes?$
     | ^interviews?$
     | ^bloopers?$
-    | ^fake.endings?$
+    | ^fake\ endings?$
     | ^shorts?$
     | ^promos?$
     """,
@@ -77,26 +90,41 @@ _JUNK_DIR_NAMES = re.compile(
 
 
 def is_junk(path: Path) -> bool:
-    """Return True if *path* looks like a junk/sidecar file.
+    """Return True if path is almost certainly a junk file.
 
     Checks (in order):
-    1. File extension is a known non-media type (.nfo, .jpg, etc.)
-    2. Video stem matches junk patterns (sample, trailer, hex hash…)
+    1. Non-video sidecar extension (.nfo, .jpg, etc.)
+    2. Video stem matches known junk patterns (sample, trailer, hex hash…)
     3. Any parent directory name matches junk folder patterns (Featurettes/, Extras/…)
     """
     suffix = path.suffix.lower()
+    stem = path.stem
+
+    # Non-video sidecar files are always junk
     if suffix in _JUNK_EXTENSIONS:
         return True
 
-    stem = path.stem
-    if _JUNK_VIDEO_STEMS.search(stem):
-        return True
+    # Video files: check name against known junk patterns
+    if suffix in _VIDEO_EXTENSIONS:
+        if _JUNK_VIDEO_STEMS.match(stem):
+            return True
+        if _HEX_HASH.match(stem):
+            return True
 
+    # Check parent directory names — catches Featurettes/Zombie Meat.mkv etc.
     return any(_JUNK_DIR_NAMES.match(parent.name) for parent in path.parents)
 
 
+def find_junk(root: Path) -> list[Path]:
+    """Return all junk files found recursively under root, sorted."""
+    return sorted(p for p in root.rglob("*") if p.is_file() and is_junk(p))
+
+
 def junk_destination(file: Path, source_root: Path, dest_root: Path) -> Path:
-    """Return the quarantine path for *file* under ``dest_root/.junk/``."""
+    """Return the path where *file* would land in the .junk quarantine dir.
+
+    Structure: dest_root/.junk/<relative-subdir-from-source-root>/filename
+    """
     try:
         rel = file.relative_to(source_root)
     except ValueError:
@@ -104,44 +132,35 @@ def junk_destination(file: Path, source_root: Path, dest_root: Path) -> Path:
     return dest_root / _JUNK_DIR_NAME / rel
 
 
-def report_junk(
-    junk_files: list[Path],
-    source_root: Path,
-    dest_root: Path,
-    dry_run: bool,
-    console: Console | None = None,
-) -> None:
-    """Print a summary table of junk files and their quarantine destinations."""
+def report_junk(junk_files: list[Path], source_root: Path, dest_root: Path, dry_run: bool) -> None:
+    """Print a summary of junk found and where files would be (or are being) moved."""
     if not junk_files:
+        console.print("[dim]No junk files found.[/dim]")
         return
 
-    con = console or Console()
-    verb = "Would move" if dry_run else "Moving"
-    con.print(
-        f"\n[bold yellow]Junk files ({len(junk_files)}) — {verb} to {dest_root / _JUNK_DIR_NAME}[/bold yellow]"
+    action = "Would move" if dry_run else "Moving"
+    console.print(
+        f"\n[bold yellow]Junk files ({len(junk_files)}) — {action} to {dest_root / _JUNK_DIR_NAME}:[/bold yellow]"
     )
     for f in junk_files:
         dest = junk_destination(f, source_root, dest_root)
-        con.print(f"  [dim]{f.relative_to(source_root)}[/dim] → [dim]{dest}[/dim]")
+        console.print(f"  [yellow]→[/yellow] {f.name}  [dim]→ {dest}[/dim]")
 
 
-def move_junk(
-    junk_files: list[Path],
-    source_root: Path,
-    dest_root: Path,
-) -> tuple[int, int]:
-    """Move junk files to the quarantine directory. Returns (moved, failed)."""
-    moved = 0
-    failed = 0
+def move_junk(junk_files: list[Path], source_root: Path, dest_root: Path) -> tuple[int, int]:
+    """Move junk files into dest_root/.junk preserving relative structure.
+
+    Returns (moved, failed) counts.
+    """
+    moved = failed = 0
     for f in junk_files:
         dest = junk_destination(f, source_root, dest_root)
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                failed += 1
-                continue
             shutil.move(str(f), dest)
+            console.print(f"  [green]✓ moved:[/green] {f.name}  [dim]→ {dest}[/dim]")
             moved += 1
-        except OSError:
+        except OSError as exc:
+            console.print(f"  [red]✗ failed:[/red] {f} — {exc}")
             failed += 1
     return moved, failed

@@ -172,6 +172,7 @@ def organize(
             console.print(f"[dim]SKIP (already moved in previous run):[/dim] {file.name}")
             continue
 
+        # Identify junk before any title parsing so junk never triggers a prompt
         if is_junk(file):
             console.print(f"[dim]JUNK:[/dim] {file.name}")
             junk_files.append(file)
@@ -361,10 +362,12 @@ def organize(
 
         planned_moves.append(plan_move(guessed, match, dest, file))
 
-    report_junk(junk_files, source, dest, dry_run, console)
-    if apply and junk_files:
-        moved, failed = move_junk(junk_files, source, dest)
-        console.print(f"[dim]Junk: moved {moved}, failed {failed}[/dim]")
+    if junk_files:
+        report_junk(junk_files, source, dest, dry_run)
+        if not dry_run:
+            moved, failed = move_junk(junk_files, source, dest)
+            if failed:
+                err_console.print(f"[yellow]{failed} junk file(s) could not be moved.[/yellow]")
 
     plan = build_plan(planned_moves)
 
