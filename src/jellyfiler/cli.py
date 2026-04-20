@@ -1,6 +1,7 @@
 """CLI entry point."""
 
 import os
+import re
 from pathlib import Path
 from typing import Annotated
 
@@ -39,6 +40,14 @@ def _get_tmdb_client() -> TmdbClient:
         )
         raise typer.Exit(1)
     return TmdbClient(api_key=api_key)
+
+
+_ROMAN_SUFFIX = re.compile(r"\s+[IVXLCDM]+$", re.IGNORECASE)
+
+
+def _strip_roman_suffix(title: str) -> str:
+    """Strip a trailing Roman numeral from a title ('Superman I' → 'Superman')."""
+    return _ROMAN_SUFFIX.sub("", title).strip()
 
 
 def _resolve_match(
@@ -366,10 +375,28 @@ def organize(
                 progress.advance(task)
                 continue
 
+            # Retry with Roman numeral stripped if initial search had no confident hit
+            search_title = guessed.title
+            if not best_match(matches, guessed.title, guessed.year):
+                stripped = _strip_roman_suffix(guessed.title)
+                if stripped != guessed.title:
+                    try:
+                        retry = (
+                            tmdb.search_movie(stripped, guessed.year)
+                            if guessed.media_type == MediaType.MOVIE
+                            else tmdb.search_tv(stripped, None)
+                        )
+                        if retry:
+                            matches = retry
+                            search_title = stripped
+                            cache.set_tmdb(stripped, _cache_year, guessed.media_type, retry)
+                    except Exception:
+                        pass
+
             if interactive:
                 progress.stop()
             match = _resolve_match(
-                file, guessed.title, guessed.year, matches, guessed.media_type, interactive
+                file, search_title, guessed.year, matches, guessed.media_type, interactive
             )
             if interactive:
                 progress.start()
