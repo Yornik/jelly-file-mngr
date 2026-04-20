@@ -54,6 +54,8 @@ def _strip_roman_suffix(title: str) -> str:
 
 def _title_variants(title: str) -> list[str]:
     """Return alternative search strings to try when the canonical title misses."""
+    import wordninja
+
     variants: list[str] = []
     # Strip trailing Roman numeral: "Superman I" → "Superman"
     stripped = _strip_roman_suffix(title)
@@ -62,10 +64,15 @@ def _title_variants(title: str) -> list[str]:
     # Replace & with 'and': "Superman & Batman" → "Superman and Batman"
     if "&" in title:
         variants.append(title.replace("&", "and").replace("  ", " ").strip())
-    # Split CamelCase / run-together words: "wonderwoman" → "wonder woman"
+    # Split CamelCase: "WonderWoman" → "Wonder Woman"
     spaced = _CAMEL_SPLIT.sub(" ", title)
     if spaced != title:
         variants.append(spaced)
+    # Word-segment run-together lowercase: "wonderwoman" → "wonder woman"
+    if " " not in title and title == title.lower():
+        segmented = " ".join(wordninja.split(title))
+        if segmented != title:
+            variants.append(segmented)
     return variants
 
 

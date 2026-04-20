@@ -7,8 +7,9 @@ import guessit
 
 from jellyfiler.models import GuessedMedia, MediaType
 
-# Leading single-char sort prefixes: "b. Superman II" → "Superman II"
-_LEADING_PREFIX = re.compile(r"^[a-zA-Z]\.\s+")
+# Lowercase consonant sort prefix, with or without period: "b Superman II" → "Superman II"
+# Excludes vowels (a/e/i/o/u) since they can be articles. Uppercase letters are real titles.
+_LEADING_PREFIX = re.compile(r"^[b-df-hj-np-tv-z]\.? (?=[A-Z])")
 # Quality residue guessit sometimes leaves in titles: "ghostbusters 720bd" → "ghostbusters"
 _QUALITY_RESIDUE = re.compile(r"\s+\d{3,4}[bBpP][dD]?\b.*$")
 
