@@ -186,12 +186,48 @@ def _planned_move(skipped: bool = False) -> PlannedMove:
     )
 
 
+def _planned_move_to(src: str, dst: str, skipped: bool = False) -> PlannedMove:
+    return PlannedMove(
+        source=Path(src),
+        destination=Path(dst),
+        media_type=MediaType.MOVIE,
+        tmdb_id=1,
+        matched_title="Test",
+        confidence="high",
+        skipped=skipped,
+        skip_reason="reason" if skipped else "",
+    )
+
+
 def test_build_plan_splits_moves_and_skipped():
-    moves = [_planned_move(skipped=False), _planned_move(skipped=False)]
+    moves = [
+        _planned_move_to("a.mkv", "dest/a.mkv"),
+        _planned_move_to("b.mkv", "dest/b.mkv"),
+    ]
     skips = [_planned_move(skipped=True)]
     plan = build_plan(moves + skips)
     assert len(plan.moves) == 2
     assert len(plan.skipped) == 1
+
+
+def test_build_plan_deduplicates_by_keeping_largest(tmp_path: Path) -> None:
+    """When two files map to the same destination, keep the larger one, skip the smaller."""
+    large = tmp_path / "movie_hd.mkv"
+    small = tmp_path / "movie_sd.mkv"
+    large.write_bytes(b"x" * 1000)
+    small.write_bytes(b"x" * 100)
+    dest = Path("Movie (2020)/Movie (2020).mkv")
+
+    moves = [
+        _planned_move_to(str(large), str(dest)),
+        _planned_move_to(str(small), str(dest)),
+    ]
+    plan = build_plan(moves)
+    assert len(plan.moves) == 1
+    assert plan.moves[0].source == large
+    assert len(plan.skipped) == 1
+    assert plan.skipped[0].source == small
+    assert "Duplicate destination" in plan.skipped[0].skip_reason
 
 
 def test_build_plan_empty():
