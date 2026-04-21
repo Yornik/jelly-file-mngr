@@ -17,10 +17,10 @@ from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.executor import ExecutionError, execute
 from jellyfiler.guesser import guess
 from jellyfiler.interactive import prompt_episode_number, prompt_manual_title, prompt_tmdb_match
-from jellyfiler.junk import is_junk, move_junk, report_junk
+from jellyfiler.junk import find_junk, is_junk, move_junk, report_junk
 from jellyfiler.models import MediaType, PlannedMove
 from jellyfiler.planner import build_plan, plan_move
-from jellyfiler.scanner import find_media_files
+from jellyfiler.scanner import VIDEO_EXTENSIONS, find_media_files
 from jellyfiler.tmdb import TmdbClient, TmdbMatch, best_match
 
 __version__ = "0.1.0"
@@ -348,7 +348,11 @@ def organize(
         console.print(f"[dim]Cache: {cache_db}[/dim]\n")
 
     planned_moves: list[PlannedMove] = []
-    junk_files: list[Path] = []
+    # Pre-scan for non-video junk (nfo, jpg, sfv, txt, …) that find_media_files skips.
+    # Video junk (samples, trailers) is caught per-file in the main loop below.
+    junk_files: list[Path] = [
+        f for f in find_junk(source) if f.suffix.lower() not in VIDEO_EXTENSIONS
+    ]
     tmdb_errors = 0
     permission_errors = 0
     ai_disabled = False  # set to True if user opts out mid-run after an AI error
@@ -686,7 +690,13 @@ def organize(
     empty_dirs_count = 0
     if in_place and cleanup_empty_dirs:
         if dry_run:
+            from jellyfiler.executor import _subtitle_companions
+
             files_leaving = {m.source for m in plan.moves} | set(junk_files)
+            # Subtitle sidecars are moved by the executor but not tracked in plan.moves;
+            # include them so the simulation doesn't think their release folder is still occupied.
+            for move in plan.moves:
+                files_leaving.update(_subtitle_companions(move.source))
             empty_dirs_count, sim_perm_errors = _simulate_empty_dirs(source, files_leaving)
             permission_errors += sim_perm_errors
         else:
