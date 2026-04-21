@@ -81,13 +81,31 @@ def test_list_season_uses_first_element():
     assert g.season == 1
 
 
-def test_list_episode_uses_first_element():
+def test_list_episode_uses_min_as_start():
     with patch(
         "jellyfiler.guesser.guessit.guessit",
         return_value={"type": "episode", "title": "Show", "season": 1, "episode": [3, 4]},
     ):
         g = guess(Path("X.mkv"))
     assert g.episode == 3
+    assert g.episode_end == 4
+
+
+def test_multi_episode_range():
+    """S03E01E02E03 → episode=1, episode_end=3."""
+    with patch(
+        "jellyfiler.guesser.guessit.guessit",
+        return_value={"type": "episode", "title": "Show", "season": 3, "episode": [1, 2, 3]},
+    ):
+        g = guess(Path("Show.S03E01E02E03.mkv"))
+    assert g.episode == 1
+    assert g.episode_end == 3
+
+
+def test_single_episode_has_no_episode_end():
+    g = guess(Path("Futurama.S12E03.1080p.x265-ELiTE.mkv"))
+    assert g.episode == 3
+    assert g.episode_end is None
 
 
 def test_title_from_parent_dir():

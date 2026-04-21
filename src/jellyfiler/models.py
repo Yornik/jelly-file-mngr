@@ -19,6 +19,7 @@ class GuessedMedia:
     year: int | None = None
     season: int | None = None
     episode: int | None = None
+    episode_end: int | None = None
     episode_title: str | None = None
     raw_guess: dict[str, object] = field(default_factory=dict)
 
