@@ -125,6 +125,15 @@ uv run jellyfiler --version
 uv run jellyfiler scan /path/to/source
 ```
 
+Prints a table of what guessit detected for every media file in the directory:
+
+| Filename | Type | Title | Year | S | E |
+|---|---|---|---|---|---|
+| Futurama.S12E01.1080p.x265.mkv | episode | Futurama | — | 12 | 1 |
+| Blade.Runner.2049.2017.mkv | movie | Blade Runner 2049 | 2017 | — | — |
+
+No TMDB calls are made. Use this to check why a file is being misidentified before running `organize`.
+
 ### In-place mode
 
 Reorganize within the source directory itself — no separate destination needed.
