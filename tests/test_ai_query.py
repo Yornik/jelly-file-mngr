@@ -1,6 +1,8 @@
 """Tests for the Claude Haiku AI search query fallback."""
 
 import json
+import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import anthropic
@@ -112,3 +114,61 @@ def test_suggest_search_returns_none_when_anthropic_not_available():
     with patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", False):
         result = suggest_search("folder", "file.mkv", "fake-key")
     assert result is None
+
+
+def test_use_ai_flag_gates_ai_call():
+    """suggest_search must NOT be called when use_ai=False (the default)."""
+    with patch("jellyfiler.cli.suggest_search") as mock_suggest:
+        with patch("jellyfiler.cli.find_media_files", return_value=[]):
+            from typer.testing import CliRunner
+
+            from jellyfiler.cli import app
+
+            runner = CliRunner()
+            runner.invoke(app, ["organize", "/fake/src", "/fake/dest"], catch_exceptions=False)
+        mock_suggest.assert_not_called()
+
+
+def test_use_ai_flag_true_calls_suggest_search(tmp_path: Path):
+    """suggest_search MUST be called when --use-ai is passed and TMDB finds nothing."""
+    from typer.testing import CliRunner
+
+    from jellyfiler.cli import app
+    from jellyfiler.guesser import GuessedMedia
+    from jellyfiler.models import MediaType
+
+    fake_file = tmp_path / "Unknown.Title.2020.mkv"
+    fake_file.touch()
+
+    guessed = GuessedMedia(
+        source_path=fake_file,
+        media_type=MediaType.MOVIE,
+        title="Unknown Title",
+        year=2020,
+    )
+
+    mock_cache = MagicMock()
+    mock_cache.already_moved.return_value = False
+    mock_cache.get_pinned.return_value = None
+    mock_cache.get_tmdb.return_value = None
+
+    mock_tmdb = MagicMock()
+    mock_tmdb.search_movie.return_value = []
+
+    with (
+        patch("jellyfiler.cli.find_media_files", return_value=[fake_file]),
+        patch("jellyfiler.cli.guess", return_value=guessed),
+        patch("jellyfiler.cli.Cache", return_value=mock_cache),
+        patch("jellyfiler.cli.TmdbClient", return_value=mock_tmdb),
+        patch("jellyfiler.cli.best_match", return_value=None),
+        patch("jellyfiler.cli.suggest_search", return_value=None) as mock_suggest,
+        patch.dict(os.environ, {"TMDB_API_KEY": "fake", "ANTHROPIC_API_KEY": "fake-ai-key"}),
+    ):
+        runner = CliRunner()
+        runner.invoke(
+            app,
+            ["organize", str(tmp_path), str(tmp_path / "dest"), "--use-ai", "--no-interactive"],
+            catch_exceptions=False,
+        )
+
+    mock_suggest.assert_called_once()

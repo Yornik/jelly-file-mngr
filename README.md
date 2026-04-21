@@ -104,6 +104,10 @@ uv run jellyfiler /source /dest --type episode
 # Non-interactive — skip ambiguous matches instead of prompting (good for automation)
 uv run jellyfiler /source /dest --no-interactive --apply
 
+# Enable Claude Haiku AI fallback for titles that defeat all other parsing
+# (requires ANTHROPIC_API_KEY — off by default to avoid unintentional spend)
+uv run jellyfiler /source /dest --use-ai --apply
+
 # Show version
 uv run jellyfiler --version
 ```

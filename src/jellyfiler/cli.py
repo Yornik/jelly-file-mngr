@@ -212,6 +212,13 @@ def organize(
         bool,
         typer.Option("--quiet", "-q", help="Suppress per-file output; show summary only."),
     ] = False,
+    use_ai: Annotated[
+        bool,
+        typer.Option(
+            "--use-ai",
+            help="Enable Claude Haiku AI fallback for hard-to-parse titles (requires ANTHROPIC_API_KEY).",
+        ),
+    ] = False,
 ) -> None:
     """Scan SOURCE, match against TMDB, and organize into DEST.
 
@@ -489,7 +496,7 @@ def organize(
                         pass
 
             # AI fallback: if all variants missed, ask Haiku for a better search query
-            if not best_match(matches, search_title, guessed.year):
+            if use_ai and not best_match(matches, search_title, guessed.year):
                 ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
                 if ai_key:
                     suggestion = suggest_search(
