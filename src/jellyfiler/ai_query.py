@@ -20,6 +20,28 @@ _SYSTEM_MOVIE = 'Extract the movie title and release year from a release name. R
 _SYSTEM_TV = 'Extract the TV show title from a release name. Reply with ONLY JSON: {"title":"..."}'
 
 
+def preflight_check(api_key: str) -> bool:
+    """Send a minimal ping to Haiku and verify it responds with "true".
+
+    Returns True when the key works, False on any error.
+    """
+    if not _ANTHROPIC_AVAILABLE or _anthropic is None:
+        return False
+    try:
+        client = _anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=8,
+            messages=[{"role": "user", "content": "respond with the single word: true"}],
+        )
+        block = message.content[0]
+        if not isinstance(block, _TextBlock):
+            return False
+        return block.text.strip().lower() == "true"
+    except Exception:
+        return False
+
+
 def suggest_search(
     parent_dir: str,
     filename: str,

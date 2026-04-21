@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import anthropic
 
-from jellyfiler.ai_query import _SYSTEM_MOVIE, _SYSTEM_TV, suggest_search
+from jellyfiler.ai_query import _SYSTEM_MOVIE, _SYSTEM_TV, preflight_check, suggest_search
 
 
 def _make_response(text: str) -> MagicMock:
@@ -116,6 +116,67 @@ def test_suggest_search_returns_none_when_anthropic_not_available():
     assert result is None
 
 
+def test_preflight_check_returns_true_on_success():
+    mock = _mock_anthropic("true")
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        assert preflight_check("fake-key") is True
+
+
+def test_preflight_check_returns_false_on_wrong_response():
+    mock = _mock_anthropic("hello there")
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        assert preflight_check("fake-key") is False
+
+
+def test_preflight_check_returns_false_on_api_error():
+    mock_module = MagicMock()
+    mock_module.Anthropic.return_value.messages.create.side_effect = Exception("auth failed")
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock_module),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        assert preflight_check("bad-key") is False
+
+
+def test_use_ai_aborts_when_key_missing():
+    """--use-ai with no ANTHROPIC_API_KEY must exit with an error before scanning."""
+    from typer.testing import CliRunner
+
+    from jellyfiler.cli import app
+
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    with patch.dict(os.environ, env, clear=True):
+        # Still need TMDB_API_KEY so the client init doesn't fail first
+        os.environ["TMDB_API_KEY"] = "fake"
+        runner = CliRunner()
+        result = runner.invoke(app, ["organize", "/fake/src", "/fake/dest", "--use-ai"])
+    assert result.exit_code != 0
+    assert "ANTHROPIC_API_KEY" in result.output or (
+        result.stdout and "ANTHROPIC_API_KEY" in result.stdout
+    )
+
+
+def test_use_ai_aborts_when_preflight_fails():
+    """--use-ai must abort when Haiku doesn't respond 'true'."""
+    from typer.testing import CliRunner
+
+    from jellyfiler.cli import app
+
+    with (
+        patch("jellyfiler.cli.preflight_check", return_value=False),
+        patch.dict(os.environ, {"TMDB_API_KEY": "fake", "ANTHROPIC_API_KEY": "bad-key"}),
+    ):
+        runner = CliRunner()
+        result = runner.invoke(app, ["organize", "/fake/src", "/fake/dest", "--use-ai"])
+    assert result.exit_code != 0
+
+
 def test_use_ai_flag_gates_ai_call():
     """suggest_search must NOT be called when use_ai=False (the default)."""
     with patch("jellyfiler.cli.suggest_search") as mock_suggest:
@@ -156,6 +217,7 @@ def test_use_ai_flag_true_calls_suggest_search(tmp_path: Path):
     mock_tmdb.search_movie.return_value = []
 
     with (
+        patch("jellyfiler.cli.preflight_check", return_value=True),
         patch("jellyfiler.cli.find_media_files", return_value=[fake_file]),
         patch("jellyfiler.cli.guess", return_value=guessed),
         patch("jellyfiler.cli.Cache", return_value=mock_cache),

@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
-from jellyfiler.ai_query import suggest_search
+from jellyfiler.ai_query import preflight_check, suggest_search
 from jellyfiler.anilist import looks_like_anime, search_anime
 from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.executor import ExecutionError, execute
@@ -252,6 +252,25 @@ def organize(
         raise typer.Exit(1)
 
     dry_run = not apply or dry_run_flag
+
+    # --use-ai preflight: key must exist and Haiku must respond "true"
+    if use_ai:
+        ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not ai_key:
+            err_console.print(
+                "[bold red]Error:[/bold red] --use-ai requires ANTHROPIC_API_KEY to be set."
+            )
+            raise typer.Exit(1)
+        if not quiet:
+            console.print("[dim]Checking Anthropic API key...[/dim]")
+        if not preflight_check(ai_key):
+            err_console.print(
+                "[bold red]Error:[/bold red] Anthropic API key check failed — "
+                "verify ANTHROPIC_API_KEY is valid."
+            )
+            raise typer.Exit(1)
+        if not quiet:
+            console.print("[green]✓[/green] Anthropic API key OK")
 
     if not quiet:
         if dry_run:
