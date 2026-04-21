@@ -14,14 +14,20 @@ except ImportError:
     _ANTHROPIC_AVAILABLE = False
 
 
+_SYSTEM_MOVIE = 'Extract the movie title and release year from a release name. Reply with ONLY JSON: {"title":"...","year":null}'
+_SYSTEM_TV = 'Extract the TV show title from a release name. Reply with ONLY JSON: {"title":"..."}'
+
+
 def suggest_search(
     parent_dir: str,
     filename: str,
     api_key: str,
+    is_tv: bool = False,
 ) -> dict[str, object] | None:
     """Ask Claude Haiku to parse a release name into a clean TMDB search query.
 
-    Returns a dict with keys: title (str), year (int|None), media_type ("movie"|"episode").
+    For movies returns {title, year}. For TV returns {title} only — year is
+    never passed to search_tv so there is no point asking for it.
     Returns None on any error so the caller can silently continue.
 
     Uses ANTHROPIC_API_KEY — not Bedrock — since this is a personal project.
@@ -33,8 +39,8 @@ def suggest_search(
         client = _anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=64,
-            system='Extract TMDB search metadata from a release name. Reply with ONLY JSON: {"title":"...","year":null,"media_type":"movie or episode"}',
+            max_tokens=48,
+            system=_SYSTEM_TV if is_tv else _SYSTEM_MOVIE,
             messages=[
                 {
                     "role": "user",

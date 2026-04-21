@@ -435,7 +435,12 @@ def organize(
             if not best_match(matches, search_title, guessed.year):
                 ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
                 if ai_key:
-                    suggestion = suggest_search(file.parent.name, file.name, ai_key)
+                    suggestion = suggest_search(
+                        file.parent.name,
+                        file.name,
+                        ai_key,
+                        is_tv=guessed.media_type == MediaType.EPISODE,
+                    )
                     if suggestion:
                         ai_title = str(suggestion.get("title", ""))
                         ai_year_raw = suggestion.get("year")
