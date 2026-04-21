@@ -100,6 +100,18 @@ def plan_move(
             skip_reason="Already in the correct Jellyfin location — no action needed",
         )
 
+    if destination.exists():
+        return PlannedMove(
+            source=source,
+            destination=destination,
+            media_type=guessed.media_type,
+            tmdb_id=match.tmdb_id,
+            matched_title=match.title,
+            confidence="high",
+            skipped=True,
+            skip_reason="Destination already occupied by an existing file — skipping duplicate",
+        )
+
     return PlannedMove(
         source=source,
         destination=destination,
@@ -112,9 +124,45 @@ def plan_move(
 
 def build_plan(planned_moves: list[PlannedMove]) -> Plan:
     plan = Plan()
+
+    # Group non-skipped moves by destination to detect duplicates.
+    # When multiple source files resolve to the same destination (e.g. different language
+    # dubs, multiple quality versions all matched to the same TMDB entry), keep the
+    # largest file and skip the rest rather than aborting the entire run.
+    dest_to_moves: dict[Path, list[PlannedMove]] = {}
     for move in planned_moves:
         if move.skipped:
             plan.skipped.append(move)
         else:
-            plan.moves.append(move)
+            dest_to_moves.setdefault(move.destination, []).append(move)
+
+    for dest, moves in dest_to_moves.items():
+        if len(moves) == 1:
+            plan.moves.append(moves[0])
+        else:
+            # Keep the largest file; skip the rest.
+            winner = max(
+                moves,
+                key=lambda m: m.source.stat().st_size if m.source.exists() else 0,
+            )
+            plan.moves.append(winner)
+            for loser in moves:
+                if loser is winner:
+                    continue
+                plan.skipped.append(
+                    PlannedMove(
+                        source=loser.source,
+                        destination=dest,
+                        media_type=loser.media_type,
+                        tmdb_id=loser.tmdb_id,
+                        matched_title=loser.matched_title,
+                        confidence=loser.confidence,
+                        skipped=True,
+                        skip_reason=(
+                            f"Duplicate destination — keeping larger file "
+                            f"'{winner.source.name}' for this destination"
+                        ),
+                    )
+                )
+
     return plan

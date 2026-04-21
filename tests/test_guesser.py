@@ -128,3 +128,39 @@ def test_year_from_parent_dir():
     p = Path("Blade.Runner.2049.2017.UHD") / "Blade.Runner.2049.mkv"
     g = guess(p)
     assert g.year == 2017
+
+
+def test_show_title_from_grandparent_season_folder(tmp_path: Path) -> None:
+    """Show/Season N/bare-episode.mp4 — show title comes from grandparent, not episode name."""
+    d = tmp_path / "Phineas and Ferb" / "Season 02"
+    d.mkdir(parents=True)
+    f = d / "Hail Doofania!.mp4"
+    f.touch()
+    g = guess(f)
+    assert g.title == "Phineas and Ferb"
+    assert g.season == 2
+    assert g.media_type == MediaType.EPISODE
+
+
+def test_numeric_prefix_episode_with_grandparent(tmp_path: Path) -> None:
+    """082 - What Do It Do.mp4 in Show/Season 02/ → title=show, episode=82."""
+    d = tmp_path / "Phineas and Ferb" / "Season 02"
+    d.mkdir(parents=True)
+    f = d / "082 - What Do It Do.mp4"
+    f.touch()
+    g = guess(f)
+    assert g.title == "Phineas and Ferb"
+    assert g.season == 2
+    assert g.episode == 82
+    assert g.media_type == MediaType.EPISODE
+
+
+def test_well_named_episode_not_overridden_by_grandparent(tmp_path: Path) -> None:
+    """S01E01 file already has the right show title — grandparent must not override it."""
+    d = tmp_path / "Some Other Folder" / "Season 01"
+    d.mkdir(parents=True)
+    f = d / "Futurama.S01E01.mkv"
+    f.touch()
+    g = guess(f)
+    # Futurama comes from the filename; "Some Other Folder" must not win
+    assert g.title == "Futurama"

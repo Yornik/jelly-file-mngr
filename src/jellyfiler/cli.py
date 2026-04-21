@@ -11,16 +11,16 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
-from jellyfiler.ai_query import AiQueryError, preflight_check, suggest_search
+from jellyfiler.ai_query import AiQueryError, AiUsage, preflight_check, suggest_search
 from jellyfiler.anilist import looks_like_anime, search_anime
 from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.executor import ExecutionError, execute
 from jellyfiler.guesser import guess
 from jellyfiler.interactive import prompt_episode_number, prompt_manual_title, prompt_tmdb_match
-from jellyfiler.junk import is_junk, move_junk, report_junk
+from jellyfiler.junk import find_junk, is_junk, move_junk, report_junk
 from jellyfiler.models import MediaType, PlannedMove
 from jellyfiler.planner import build_plan, plan_move
-from jellyfiler.scanner import find_media_files
+from jellyfiler.scanner import VIDEO_EXTENSIONS, find_media_files
 from jellyfiler.tmdb import TmdbClient, TmdbMatch, best_match
 
 __version__ = "0.1.0"
@@ -98,11 +98,14 @@ def _title_variants(title: str) -> list[str]:
     spaced = _CAMEL_SPLIT.sub(" ", title)
     if spaced != title:
         variants.append(spaced)
-    # Word-segment run-together lowercase: "wonderwoman" → "wonder woman"
-    if " " not in title and title == title.lower():
-        segmented = " ".join(wordninja.split(title))
-        if segmented != title:
-            variants.append(segmented)
+    # Word-segment run-together words (any case): "wonderwoman" → "wonder woman",
+    # "Bestgayiceskatinganime" (normalized from all-caps) → "Best Gay Ice Skating Anime"
+    if " " not in title:
+        parts = wordninja.split(title.lower())
+        if len(parts) > 1:
+            segmented = " ".join(p.capitalize() for p in parts)
+            if segmented.lower() != title.lower():
+                variants.append(segmented)
     return variants
 
 
@@ -123,7 +126,7 @@ def _resolve_match(
     # No confident match found
     if interactive and matches:
         # We have TMDB results but none matched confidently — let the user pick
-        return prompt_tmdb_match(file.name, guessed_title, matches, media_type)
+        return prompt_tmdb_match(file, guessed_title, matches, media_type)
 
     return None
 
@@ -136,6 +139,33 @@ def _fmt_size(total_bytes: int) -> str:
     return f"{total_bytes:.0f} TB"
 
 
+def _simulate_empty_dirs(source: Path, files_leaving: set[Path]) -> tuple[int, int]:
+    """Count directories that would become empty after files_leaving are removed.
+
+    Returns (would_remove_count, permission_error_count).
+    """
+    remaining = {f for f in source.rglob("*") if f.is_file() and f not in files_leaving}
+    would_remove: set[Path] = set()
+    permission_errors = 0
+    for dirpath in sorted(source.rglob("*"), reverse=True):
+        if dirpath == source or not dirpath.is_dir():
+            continue
+        try:
+            children = list(dirpath.iterdir())
+        except PermissionError:
+            has_content = True  # can't read → assume non-empty, never mark for removal
+            permission_errors += 1
+        else:
+            has_content = any(
+                c
+                for c in children
+                if (c.is_file() and c in remaining) or (c.is_dir() and c not in would_remove)
+            )
+        if not has_content:
+            would_remove.add(dirpath)
+    return len(would_remove), permission_errors
+
+
 def _print_summary(
     planned: int,
     skipped: int,
@@ -143,16 +173,33 @@ def _print_summary(
     junk_bytes: int,
     tmdb_errors: int,
     dry_run: bool,
+    empty_dirs: int = 0,
+    permission_errors: int = 0,
+    ai_usage: AiUsage | None = None,
 ) -> None:
     lines = [
         f"  [green]✓[/green]  Planned moves   [bold]{planned:>5}[/bold]",
         f"  [yellow]⚠[/yellow]  Skipped         [bold]{skipped:>5}[/bold]",
         f"  [dim]🗑  Junk files     [bold]{junk_count:>5}[/bold]  ({_fmt_size(junk_bytes)})[/dim]",
     ]
+    if empty_dirs:
+        label = "Empty dirs (sim)" if dry_run else "Empty dirs removed"
+        lines.append(f"  [dim]📁  {label}[bold]{empty_dirs:>5}[/bold][/dim]")
+    if permission_errors:
+        lines.append(f"  [yellow]🔒  Permission errors[bold]{permission_errors:>4}[/bold][/yellow]")
+    if ai_usage and (ai_usage.input_tokens or ai_usage.output_tokens):
+        cost = ai_usage.cost_eur()
+        lines.append(
+            f"  [dim]🤖  AI tokens  "
+            f"[bold]{ai_usage.input_tokens:>6}[/bold] in "
+            f"[bold]{ai_usage.output_tokens:>5}[/bold] out  "
+            f"≈ €{cost:.4f}[/dim]"
+        )
     if tmdb_errors:
         lines.append(f"  [red]✗[/red]  TMDB errors     [bold]{tmdb_errors:>5}[/bold]")
     if dry_run:
-        lines.append("\n  [bold cyan]DRY RUN[/bold cyan] — pass --apply to move files")
+        apply_cmd = "--apply --cleanup-empty-dirs" if empty_dirs else "--apply"
+        lines.append(f"\n  [bold cyan]DRY RUN[/bold cyan] — pass {apply_cmd} to execute")
     console.print(Panel("\n".join(lines), title="[bold]Summary[/bold]", border_style="cyan"))
 
 
@@ -304,9 +351,15 @@ def organize(
         console.print(f"[dim]Cache: {cache_db}[/dim]\n")
 
     planned_moves: list[PlannedMove] = []
-    junk_files: list[Path] = []
+    # Pre-scan for non-video junk (nfo, jpg, sfv, txt, …) that find_media_files skips.
+    # Video junk (samples, trailers) is caught per-file in the main loop below.
+    junk_files: list[Path] = [
+        f for f in find_junk(source) if f.suffix.lower() not in VIDEO_EXTENSIONS
+    ]
     tmdb_errors = 0
+    permission_errors = 0
     ai_disabled = False  # set to True if user opts out mid-run after an AI error
+    ai_usage = AiUsage(0, 0)
     cache = Cache(cache_db)
 
     with Progress(
@@ -469,12 +522,13 @@ def organize(
                 ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
                 if ai_key:
                     try:
-                        suggestion = suggest_search(
+                        suggestion, call_usage = suggest_search(
                             file.parent.name,
                             file.name,
                             ai_key,
                             is_tv=guessed.media_type == MediaType.EPISODE,
                         )
+                        ai_usage = ai_usage + call_usage
                     except AiQueryError as exc:
                         progress.stop()
                         err_console.print(f"\n[bold red]Anthropic API error: {exc}[/bold red]")
@@ -605,9 +659,14 @@ def organize(
             if interactive and match is None and not matches:
                 progress.start()
 
-            # Pin confirmed match so future runs skip the prompt
+            # Pin confirmed match so future runs skip the prompt.
+            # Also pin under the original guessed title when the AI or a variant
+            # rewrite found the match — otherwise the same raw title triggers
+            # another AI call on the next file.
             if match:
                 cache.set_pinned(search_title, _cache_year, guessed.media_type, match)
+                if search_title != guessed.title:
+                    cache.set_pinned(guessed.title, _cache_year, guessed.media_type, match)
 
             progress.advance(task)
 
@@ -630,6 +689,22 @@ def organize(
         err_console.print(f"\n[bold red]{exc}[/bold red]")
         raise typer.Exit(1) from exc
 
+    # Empty-dir cleanup or simulation (in-place only)
+    empty_dirs_count = 0
+    if in_place and cleanup_empty_dirs:
+        if dry_run:
+            from jellyfiler.executor import _subtitle_companions
+
+            files_leaving = {m.source for m in plan.moves} | set(junk_files)
+            # Subtitle sidecars are moved by the executor but not tracked in plan.moves;
+            # include them so the simulation doesn't think their release folder is still occupied.
+            for move in plan.moves:
+                files_leaving.update(_subtitle_companions(move.source))
+            empty_dirs_count, sim_perm_errors = _simulate_empty_dirs(source, files_leaving)
+            permission_errors += sim_perm_errors
+        else:
+            empty_dirs_count = _remove_empty_dirs(source)
+
     _print_summary(
         planned=len(plan.moves),
         skipped=len(plan.skipped),
@@ -637,15 +712,14 @@ def organize(
         junk_bytes=junk_bytes,
         tmdb_errors=tmdb_errors,
         dry_run=dry_run,
+        empty_dirs=empty_dirs_count,
+        permission_errors=permission_errors,
+        ai_usage=ai_usage if use_ai else None,
     )
 
     if tmdb_errors:
         err_console.print(f"\n[yellow]{tmdb_errors} TMDB error(s) occurred — see above.[/yellow]")
         raise typer.Exit(1)
-
-    # Clean up empty source directories (in-place + apply only)
-    if in_place and apply and cleanup_empty_dirs and not dry_run:
-        _remove_empty_dirs(source)
 
 
 @app.command()
@@ -751,21 +825,17 @@ def cache_clear(
         console.print(f"  [green]✓[/green] {table}: deleted [bold]{count}[/bold] rows")
 
 
-def _remove_empty_dirs(root: Path) -> None:
-    """Recursively remove empty directories under root (but not root itself)."""
+def _remove_empty_dirs(root: Path) -> int:
+    """Recursively remove empty directories under root (but not root itself). Returns count removed."""
     removed = 0
-    # Walk bottom-up so children are processed before parents
     for dirpath in sorted(root.rglob("*"), reverse=True):
         if dirpath == root:
             continue
         if dirpath.is_dir():
             try:
-                dirpath.rmdir()  # only succeeds if directory is empty
+                dirpath.rmdir()
                 console.print(f"[dim]Removed empty dir: {dirpath}[/dim]")
                 removed += 1
             except OSError:
-                pass  # not empty, skip
-    if removed:
-        console.print(
-            f"[dim]Cleaned up {removed} empty director{'y' if removed == 1 else 'ies'}.[/dim]"
-        )
+                pass
+    return removed

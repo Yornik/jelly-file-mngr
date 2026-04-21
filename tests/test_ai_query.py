@@ -12,6 +12,7 @@ from jellyfiler.ai_query import (
     _SYSTEM_MOVIE,
     _SYSTEM_TV,
     AiQueryError,
+    AiUsage,
     preflight_check,
     suggest_search,
 )
@@ -21,6 +22,8 @@ def _make_response(text: str) -> MagicMock:
     msg = MagicMock()
     block = anthropic.types.TextBlock(type="text", text=text)
     msg.content = [block]
+    msg.usage.input_tokens = 10
+    msg.usage.output_tokens = 5
     return msg
 
 
@@ -58,10 +61,12 @@ def test_movie_returns_title_and_year():
         patch("jellyfiler.ai_query._anthropic", _mock_anthropic(json.dumps(payload))),
         patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
     ):
-        result = suggest_search("folder", "file.mkv", "fake-key", is_tv=False)
+        result, usage = suggest_search("folder", "file.mkv", "fake-key", is_tv=False)
     assert result is not None
     assert result["title"] == "Blade Runner 2049"
     assert result["year"] == 2017
+    assert usage.input_tokens == 10
+    assert usage.output_tokens == 5
 
 
 def test_tv_returns_title_only():
@@ -70,9 +75,10 @@ def test_tv_returns_title_only():
         patch("jellyfiler.ai_query._anthropic", _mock_anthropic(json.dumps(payload))),
         patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
     ):
-        result = suggest_search("Futurama.S12.1080p", "E03.mkv", "fake-key", is_tv=True)
+        result, usage = suggest_search("Futurama.S12.1080p", "E03.mkv", "fake-key", is_tv=True)
     assert result is not None
     assert result["title"] == "Futurama"
+    assert usage.input_tokens > 0
 
 
 def test_suggest_search_strips_markdown_fences():
@@ -82,7 +88,7 @@ def test_suggest_search_strips_markdown_fences():
         patch("jellyfiler.ai_query._anthropic", _mock_anthropic(wrapped)),
         patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
     ):
-        result = suggest_search("folder", "file.mkv", "fake-key")
+        result, _ = suggest_search("folder", "file.mkv", "fake-key")
     assert result is not None
     assert result["title"] == "Blade Runner 2049"
 
@@ -103,8 +109,9 @@ def test_suggest_search_returns_none_on_invalid_json():
         patch("jellyfiler.ai_query._anthropic", _mock_anthropic("not json at all")),
         patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
     ):
-        result = suggest_search("folder", "file.mkv", "fake-key")
+        result, usage = suggest_search("folder", "file.mkv", "fake-key")
     assert result is None
+    assert usage.input_tokens == 10
 
 
 def test_suggest_search_returns_none_when_title_missing():
@@ -113,14 +120,16 @@ def test_suggest_search_returns_none_when_title_missing():
         patch("jellyfiler.ai_query._anthropic", _mock_anthropic(json.dumps(payload))),
         patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
     ):
-        result = suggest_search("folder", "file.mkv", "fake-key")
+        result, usage = suggest_search("folder", "file.mkv", "fake-key")
     assert result is None
+    assert usage.input_tokens == 10
 
 
 def test_suggest_search_returns_none_when_anthropic_not_available():
     with patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", False):
-        result = suggest_search("folder", "file.mkv", "fake-key")
+        result, usage = suggest_search("folder", "file.mkv", "fake-key")
     assert result is None
+    assert usage == (0, 0)
 
 
 def test_preflight_check_returns_true_on_success():
@@ -325,7 +334,7 @@ def test_use_ai_flag_true_calls_suggest_search(tmp_path: Path):
         patch("jellyfiler.cli.Cache", return_value=mock_cache),
         patch("jellyfiler.cli.TmdbClient", return_value=mock_tmdb),
         patch("jellyfiler.cli.best_match", return_value=None),
-        patch("jellyfiler.cli.suggest_search", return_value=None) as mock_suggest,
+        patch("jellyfiler.cli.suggest_search", return_value=(None, AiUsage(0, 0))) as mock_suggest,
         patch.dict(os.environ, {"TMDB_API_KEY": "fake", "ANTHROPIC_API_KEY": "fake-ai-key"}),
     ):
         runner = CliRunner()
