@@ -12,6 +12,8 @@ from jellyfiler.models import GuessedMedia, MediaType
 _LEADING_PREFIX = re.compile(r"^[b-df-hj-np-tv-z]\.? (?=[A-Z])")
 # Quality residue guessit sometimes leaves in titles: "ghostbusters 720bd" → "ghostbusters"
 _QUALITY_RESIDUE = re.compile(r"\s+\d{3,4}[bBpP][dD]?\b.*$")
+# Leading episode number with no separator: "003isthislove" → episode=3, stem="isthislove"
+_BARE_EPISODE_PREFIX = re.compile(r"^(\d{2,4})\D")
 
 
 def _clean_title(title: str) -> str:
@@ -117,6 +119,13 @@ def guess(path: Path) -> GuessedMedia:
                     title = anc_title
                     media_type = MediaType.EPISODE
                     break
+
+    # Bare numeric episode prefix with no separator: "003isthislove" → episode=3
+    # guessit treats these as movie titles when there is no space/dot/dash before the letters.
+    if episode is None and media_type == MediaType.EPISODE:
+        m = _BARE_EPISODE_PREFIX.match(path.stem)
+        if m:
+            episode = int(m.group(1))
 
     return GuessedMedia(
         source_path=path,

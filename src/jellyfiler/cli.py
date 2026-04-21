@@ -98,11 +98,14 @@ def _title_variants(title: str) -> list[str]:
     spaced = _CAMEL_SPLIT.sub(" ", title)
     if spaced != title:
         variants.append(spaced)
-    # Word-segment run-together lowercase: "wonderwoman" → "wonder woman"
-    if " " not in title and title == title.lower():
-        segmented = " ".join(wordninja.split(title))
-        if segmented != title:
-            variants.append(segmented)
+    # Word-segment run-together words (any case): "wonderwoman" → "wonder woman",
+    # "Bestgayiceskatinganime" (normalized from all-caps) → "Best Gay Ice Skating Anime"
+    if " " not in title:
+        parts = wordninja.split(title.lower())
+        if len(parts) > 1:
+            segmented = " ".join(p.capitalize() for p in parts)
+            if segmented.lower() != title.lower():
+                variants.append(segmented)
     return variants
 
 
