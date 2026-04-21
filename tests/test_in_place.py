@@ -107,9 +107,10 @@ def test_simulate_counts_dirs_that_would_empty(tmp_path: Path) -> None:
     video = release / "Show.S01E01.mkv"
     video.touch()
 
-    count = _simulate_empty_dirs(tmp_path, {video})
+    count, perm_errors = _simulate_empty_dirs(tmp_path, {video})
 
     assert count == 1
+    assert perm_errors == 0
 
 
 def test_simulate_ignores_dirs_with_remaining_files(tmp_path: Path) -> None:
@@ -124,9 +125,10 @@ def test_simulate_ignores_dirs_with_remaining_files(tmp_path: Path) -> None:
     nfo.touch()
 
     # Only the video leaves; nfo stays → dir is not empty
-    count = _simulate_empty_dirs(tmp_path, {video})
+    count, perm_errors = _simulate_empty_dirs(tmp_path, {video})
 
     assert count == 0
+    assert perm_errors == 0
 
 
 def test_simulate_does_not_delete_any_files(tmp_path: Path) -> None:
@@ -155,10 +157,11 @@ def test_simulate_nested_empty_dirs(tmp_path: Path) -> None:
     video = inner / "file.mkv"
     video.touch()
 
-    count = _simulate_empty_dirs(tmp_path, {video})
+    count, perm_errors = _simulate_empty_dirs(tmp_path, {video})
 
     # Both outer and inner would be removed
     assert count == 2
+    assert perm_errors == 0
     # Neither actually deleted
     assert video.exists()
     assert inner.exists()
@@ -177,9 +180,10 @@ def test_simulate_skips_unreadable_dirs(tmp_path: Path) -> None:
     # Remove read+execute permission so iterdir raises PermissionError
     locked.chmod(0o000)
     try:
-        count = _simulate_empty_dirs(tmp_path, {video})
+        count, perm_errors = _simulate_empty_dirs(tmp_path, {video})
         # Can't read the dir → treated as non-empty → not counted
         assert count == 0
+        assert perm_errors == 1
         # File is untouched
         locked.chmod(0o755)
         assert video.exists()

@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
-from jellyfiler.ai_query import AiQueryError, preflight_check, suggest_search
+from jellyfiler.ai_query import AiQueryError, AiUsage, preflight_check, suggest_search
 from jellyfiler.anilist import looks_like_anime, search_anime
 from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.executor import ExecutionError, execute
@@ -136,10 +136,14 @@ def _fmt_size(total_bytes: int) -> str:
     return f"{total_bytes:.0f} TB"
 
 
-def _simulate_empty_dirs(source: Path, files_leaving: set[Path]) -> int:
-    """Count directories that would become empty after files_leaving are removed."""
+def _simulate_empty_dirs(source: Path, files_leaving: set[Path]) -> tuple[int, int]:
+    """Count directories that would become empty after files_leaving are removed.
+
+    Returns (would_remove_count, permission_error_count).
+    """
     remaining = {f for f in source.rglob("*") if f.is_file() and f not in files_leaving}
     would_remove: set[Path] = set()
+    permission_errors = 0
     for dirpath in sorted(source.rglob("*"), reverse=True):
         if dirpath == source or not dirpath.is_dir():
             continue
@@ -147,6 +151,7 @@ def _simulate_empty_dirs(source: Path, files_leaving: set[Path]) -> int:
             children = list(dirpath.iterdir())
         except PermissionError:
             has_content = True  # can't read → assume non-empty, never mark for removal
+            permission_errors += 1
         else:
             has_content = any(
                 c
@@ -155,7 +160,7 @@ def _simulate_empty_dirs(source: Path, files_leaving: set[Path]) -> int:
             )
         if not has_content:
             would_remove.add(dirpath)
-    return len(would_remove)
+    return len(would_remove), permission_errors
 
 
 def _print_summary(
@@ -166,6 +171,8 @@ def _print_summary(
     tmdb_errors: int,
     dry_run: bool,
     empty_dirs: int = 0,
+    permission_errors: int = 0,
+    ai_usage: AiUsage | None = None,
 ) -> None:
     lines = [
         f"  [green]✓[/green]  Planned moves   [bold]{planned:>5}[/bold]",
@@ -175,6 +182,16 @@ def _print_summary(
     if empty_dirs:
         label = "Empty dirs (sim)" if dry_run else "Empty dirs removed"
         lines.append(f"  [dim]📁  {label}[bold]{empty_dirs:>5}[/bold][/dim]")
+    if permission_errors:
+        lines.append(f"  [yellow]🔒  Permission errors[bold]{permission_errors:>4}[/bold][/yellow]")
+    if ai_usage and (ai_usage.input_tokens or ai_usage.output_tokens):
+        cost = ai_usage.cost_eur()
+        lines.append(
+            f"  [dim]🤖  AI tokens  "
+            f"[bold]{ai_usage.input_tokens:>6}[/bold] in "
+            f"[bold]{ai_usage.output_tokens:>5}[/bold] out  "
+            f"≈ €{cost:.4f}[/dim]"
+        )
     if tmdb_errors:
         lines.append(f"  [red]✗[/red]  TMDB errors     [bold]{tmdb_errors:>5}[/bold]")
     if dry_run:
@@ -332,7 +349,9 @@ def organize(
     planned_moves: list[PlannedMove] = []
     junk_files: list[Path] = []
     tmdb_errors = 0
+    permission_errors = 0
     ai_disabled = False  # set to True if user opts out mid-run after an AI error
+    ai_usage = AiUsage(0, 0)
     cache = Cache(cache_db)
 
     with Progress(
@@ -495,12 +514,13 @@ def organize(
                 ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
                 if ai_key:
                     try:
-                        suggestion = suggest_search(
+                        suggestion, call_usage = suggest_search(
                             file.parent.name,
                             file.name,
                             ai_key,
                             is_tv=guessed.media_type == MediaType.EPISODE,
                         )
+                        ai_usage = ai_usage + call_usage
                     except AiQueryError as exc:
                         progress.stop()
                         err_console.print(f"\n[bold red]Anthropic API error: {exc}[/bold red]")
@@ -661,7 +681,8 @@ def organize(
     if in_place and cleanup_empty_dirs:
         if dry_run:
             files_leaving = {m.source for m in plan.moves} | set(junk_files)
-            empty_dirs_count = _simulate_empty_dirs(source, files_leaving)
+            empty_dirs_count, sim_perm_errors = _simulate_empty_dirs(source, files_leaving)
+            permission_errors += sim_perm_errors
         else:
             empty_dirs_count = _remove_empty_dirs(source)
 
@@ -673,6 +694,8 @@ def organize(
         tmdb_errors=tmdb_errors,
         dry_run=dry_run,
         empty_dirs=empty_dirs_count,
+        permission_errors=permission_errors,
+        ai_usage=ai_usage if use_ai else None,
     )
 
     if tmdb_errors:
