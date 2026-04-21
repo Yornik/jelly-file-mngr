@@ -143,11 +143,16 @@ def _simulate_empty_dirs(source: Path, files_leaving: set[Path]) -> int:
     for dirpath in sorted(source.rglob("*"), reverse=True):
         if dirpath == source or not dirpath.is_dir():
             continue
-        has_content = any(
-            c
-            for c in dirpath.iterdir()
-            if (c.is_file() and c in remaining) or (c.is_dir() and c not in would_remove)
-        )
+        try:
+            children = list(dirpath.iterdir())
+        except PermissionError:
+            has_content = True  # can't read → assume non-empty, never mark for removal
+        else:
+            has_content = any(
+                c
+                for c in children
+                if (c.is_file() and c in remaining) or (c.is_dir() and c not in would_remove)
+            )
         if not has_content:
             would_remove.add(dirpath)
     return len(would_remove)

@@ -163,3 +163,25 @@ def test_simulate_nested_empty_dirs(tmp_path: Path) -> None:
     assert video.exists()
     assert inner.exists()
     assert outer.exists()
+
+
+def test_simulate_skips_unreadable_dirs(tmp_path: Path) -> None:
+    """Dirs that raise PermissionError on iterdir are treated as non-empty (safe default)."""
+    from jellyfiler.cli import _simulate_empty_dirs
+
+    locked = tmp_path / "locked_dir"
+    locked.mkdir()
+    video = locked / "file.mkv"
+    video.touch()
+
+    # Remove read+execute permission so iterdir raises PermissionError
+    locked.chmod(0o000)
+    try:
+        count = _simulate_empty_dirs(tmp_path, {video})
+        # Can't read the dir → treated as non-empty → not counted
+        assert count == 0
+        # File is untouched
+        locked.chmod(0o755)
+        assert video.exists()
+    finally:
+        locked.chmod(0o755)
