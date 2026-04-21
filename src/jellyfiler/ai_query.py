@@ -29,21 +29,18 @@ def suggest_search(
     if not _ANTHROPIC_AVAILABLE or _anthropic is None:
         return None
 
-    prompt = (
-        "You are a media file metadata extractor. Given a parent directory name and filename "
-        "from a torrent/release, return the most likely TMDB search query as JSON.\n\n"
-        f"Parent directory: {parent_dir}\n"
-        f"Filename: {filename}\n\n"
-        "Respond with ONLY valid JSON, no explanation:\n"
-        '{"title": "...", "year": null_or_int, "media_type": "movie" or "episode", "season": null_or_int}'
-    )
-
     try:
         client = _anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=256,
-            messages=[{"role": "user", "content": prompt}],
+            max_tokens=64,
+            system='Extract TMDB search metadata from a release name. Reply with ONLY JSON: {"title":"...","year":null,"media_type":"movie","season":null}',
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"{parent_dir} / {filename}",
+                }
+            ],
         )
         raw = message.content[0].text.strip()
         # Strip markdown code fences if the model wraps the JSON
