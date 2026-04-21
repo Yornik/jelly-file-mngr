@@ -88,6 +88,18 @@ def plan_move(
             skip_reason=f"Cannot determine media type for '{source.name}'",
         )
 
+    if source == destination:
+        return PlannedMove(
+            source=source,
+            destination=destination,
+            media_type=guessed.media_type,
+            tmdb_id=match.tmdb_id,
+            matched_title=match.title,
+            confidence="high",
+            skipped=True,
+            skip_reason="Already in the correct Jellyfin location — no action needed",
+        )
+
     return PlannedMove(
         source=source,
         destination=destination,

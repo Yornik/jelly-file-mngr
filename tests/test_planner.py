@@ -112,6 +112,19 @@ def _guessed(
     )
 
 
+def test_plan_move_already_at_destination_is_skipped():
+    """File already in the correct Jellyfin location — no action needed."""
+    guessed = _guessed(MediaType.MOVIE, "Coco", season=None, episode=None)
+    match = TmdbMatch(tmdb_id=1, title="Coco", year=2017, media_type=MediaType.MOVIE)
+    # source == computed destination → already organised
+    dest_root = Path("/dest")
+    source = dest_root / "Coco (2017)" / "Coco (2017).mkv"
+    result = plan_move(guessed, match, dest_root, source)
+    assert result.skipped
+    assert "Already in the correct" in result.skip_reason
+    assert result.confidence == "high"  # matched, just already there
+
+
 def test_plan_move_no_match_is_skipped():
     guessed = _guessed(MediaType.MOVIE, "Blade Runner")
     result = plan_move(guessed, None, Path("/dest"), Path("Blade.Runner.mkv"))
