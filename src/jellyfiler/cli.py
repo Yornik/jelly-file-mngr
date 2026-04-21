@@ -195,7 +195,8 @@ def _print_summary(
     if tmdb_errors:
         lines.append(f"  [red]✗[/red]  TMDB errors     [bold]{tmdb_errors:>5}[/bold]")
     if dry_run:
-        lines.append("\n  [bold cyan]DRY RUN[/bold cyan] — pass --apply to move files")
+        apply_cmd = "--apply --cleanup-empty-dirs" if empty_dirs else "--apply"
+        lines.append(f"\n  [bold cyan]DRY RUN[/bold cyan] — pass {apply_cmd} to execute")
     console.print(Panel("\n".join(lines), title="[bold]Summary[/bold]", border_style="cyan"))
 
 
