@@ -21,8 +21,8 @@ def suggest_search(
 ) -> dict[str, object] | None:
     """Ask Claude Haiku to parse a release name into a clean TMDB search query.
 
-    Returns a dict with keys: title (str), year (int|None), media_type ("movie"|"episode"),
-    season (int|None).  Returns None on any error so the caller can silently continue.
+    Returns a dict with keys: title (str), year (int|None), media_type ("movie"|"episode").
+    Returns None on any error so the caller can silently continue.
 
     Uses ANTHROPIC_API_KEY — not Bedrock — since this is a personal project.
     """
@@ -34,7 +34,7 @@ def suggest_search(
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=64,
-            system='Extract TMDB search metadata from a release name. Reply with ONLY JSON: {"title":"...","year":null,"media_type":"movie or episode","season":null}',
+            system='Extract TMDB search metadata from a release name. Reply with ONLY JSON: {"title":"...","year":null,"media_type":"movie or episode"}',
             messages=[
                 {
                     "role": "user",

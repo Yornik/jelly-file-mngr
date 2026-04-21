@@ -19,7 +19,7 @@ def _mock_anthropic(response_text: str) -> MagicMock:
 
 
 def test_suggest_search_returns_parsed_dict():
-    payload = {"title": "Futurama", "year": None, "media_type": "episode", "season": 12}
+    payload = {"title": "Futurama", "year": None, "media_type": "episode"}
     with (
         patch("jellyfiler.ai_query._anthropic", _mock_anthropic(json.dumps(payload))),
         patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
