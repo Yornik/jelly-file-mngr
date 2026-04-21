@@ -123,7 +123,7 @@ def _resolve_match(
     # No confident match found
     if interactive and matches:
         # We have TMDB results but none matched confidently — let the user pick
-        return prompt_tmdb_match(file.name, guessed_title, matches, media_type)
+        return prompt_tmdb_match(file, guessed_title, matches, media_type)
 
     return None
 

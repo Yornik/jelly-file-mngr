@@ -1,5 +1,7 @@
 """Interactive prompts for ambiguous matches."""
 
+from pathlib import Path
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -10,7 +12,7 @@ console = Console()
 
 
 def prompt_tmdb_match(
-    filename: str,
+    file: Path,
     guessed_title: str,
     matches: list[TmdbMatch],
     media_type: MediaType,
@@ -27,7 +29,8 @@ def prompt_tmdb_match(
         )
         return matches[0]
 
-    console.print(f"\n[bold yellow]Ambiguous match for:[/bold yellow] [cyan]{filename}[/cyan]")
+    console.print(f"\n[bold yellow]Ambiguous match for:[/bold yellow] [cyan]{file.name}[/cyan]")
+    console.print(f"  path: [dim]{file.parent}[/dim]")
     console.print(f"  guessit parsed title: [bold]{guessed_title}[/bold]")
     console.print(f"  media type: [bold]{media_type.value}[/bold]\n")
 
