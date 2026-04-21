@@ -78,3 +78,88 @@ def test_cleanup_does_not_remove_root(tmp_path: Path) -> None:
     _remove_empty_dirs(tmp_path)
 
     assert tmp_path.exists()
+
+
+def test_cleanup_returns_count(tmp_path: Path) -> None:
+    """_remove_empty_dirs returns the number of directories removed."""
+    from jellyfiler.cli import _remove_empty_dirs
+
+    (tmp_path / "empty1").mkdir()
+    (tmp_path / "empty2").mkdir()
+    kept = tmp_path / "kept"
+    kept.mkdir()
+    (kept / "file.mkv").touch()
+
+    count = _remove_empty_dirs(tmp_path)
+
+    assert count == 2
+
+
+# ── _simulate_empty_dirs ─────────────────────────────────────────────────────
+
+
+def test_simulate_counts_dirs_that_would_empty(tmp_path: Path) -> None:
+    """Simulation counts a dir whose only file is in the leaving set."""
+    from jellyfiler.cli import _simulate_empty_dirs
+
+    release = tmp_path / "Show.S01.720p"
+    release.mkdir()
+    video = release / "Show.S01E01.mkv"
+    video.touch()
+
+    count = _simulate_empty_dirs(tmp_path, {video})
+
+    assert count == 1
+
+
+def test_simulate_ignores_dirs_with_remaining_files(tmp_path: Path) -> None:
+    """Dir with a file NOT in the leaving set is not counted."""
+    from jellyfiler.cli import _simulate_empty_dirs
+
+    release = tmp_path / "Show.S01.720p"
+    release.mkdir()
+    video = release / "Show.S01E01.mkv"
+    nfo = release / "release.nfo"
+    video.touch()
+    nfo.touch()
+
+    # Only the video leaves; nfo stays → dir is not empty
+    count = _simulate_empty_dirs(tmp_path, {video})
+
+    assert count == 0
+
+
+def test_simulate_does_not_delete_any_files(tmp_path: Path) -> None:
+    """Calling _simulate_empty_dirs must not touch the filesystem."""
+    from jellyfiler.cli import _simulate_empty_dirs
+
+    release = tmp_path / "Show.S01.720p"
+    release.mkdir()
+    video = release / "Show.S01E01.mkv"
+    video.touch()
+
+    _simulate_empty_dirs(tmp_path, {video})
+
+    # File and directory must still exist after simulation
+    assert video.exists()
+    assert release.exists()
+
+
+def test_simulate_nested_empty_dirs(tmp_path: Path) -> None:
+    """Nested dirs both become empty when all their files leave."""
+    from jellyfiler.cli import _simulate_empty_dirs
+
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    inner.mkdir(parents=True)
+    video = inner / "file.mkv"
+    video.touch()
+
+    count = _simulate_empty_dirs(tmp_path, {video})
+
+    # Both outer and inner would be removed
+    assert count == 2
+    # Neither actually deleted
+    assert video.exists()
+    assert inner.exists()
+    assert outer.exists()
