@@ -100,6 +100,18 @@ def plan_move(
             skip_reason="Already in the correct Jellyfin location — no action needed",
         )
 
+    if destination.exists():
+        return PlannedMove(
+            source=source,
+            destination=destination,
+            media_type=guessed.media_type,
+            tmdb_id=match.tmdb_id,
+            matched_title=match.title,
+            confidence="high",
+            skipped=True,
+            skip_reason="Destination already occupied by an existing file — skipping duplicate",
+        )
+
     return PlannedMove(
         source=source,
         destination=destination,
