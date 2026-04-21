@@ -3,6 +3,7 @@
 from pathlib import Path
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".ts", ".vob"}
+SUBTITLE_EXTENSIONS = {".srt", ".sub", ".ass", ".ssa", ".vtt", ".sup"}
 
 
 def find_media_files(root: Path) -> list[Path]:
