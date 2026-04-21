@@ -23,13 +23,42 @@ from jellyfiler.planner import build_plan, plan_move
 from jellyfiler.scanner import find_media_files
 from jellyfiler.tmdb import TmdbClient, TmdbMatch, best_match
 
+__version__ = "0.1.0"
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        console_plain = Console()
+        console_plain.print(f"jellyfiler {__version__}")
+        raise typer.Exit()
+
+
 app = typer.Typer(
     name="jellyfiler",
     help="Organize media rips into a Jellyfin-compatible directory structure.",
     add_completion=False,
 )
+cache_app = typer.Typer(name="cache", help="Inspect and manage the jellyfiler SQLite cache.")
+app.add_typer(cache_app)
+
 console = Console()
 err_console = Console(stderr=True)
+
+
+@app.callback()
+def _main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show version and exit.",
+        ),
+    ] = False,
+) -> None:
+    pass
 
 
 def _get_tmdb_client() -> TmdbClient:
@@ -167,6 +196,22 @@ def organize(
         Path,
         typer.Option("--cache-db", help="Path to the SQLite cache database."),
     ] = _DEFAULT_DB,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-n", help="Process at most N files (useful for test runs)."),
+    ] = 0,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Re-process files already recorded in the move log."),
+    ] = False,
+    dry_run_flag: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Explicit dry-run flag (same as omitting --apply)."),
+    ] = False,
+    quiet: Annotated[
+        bool,
+        typer.Option("--quiet", "-q", help="Suppress per-file output; show summary only."),
+    ] = False,
 ) -> None:
     """Scan SOURCE, match against TMDB, and organize into DEST.
 
@@ -199,19 +244,22 @@ def organize(
         )
         raise typer.Exit(1)
 
-    dry_run = not apply
+    dry_run = not apply or dry_run_flag
 
-    if dry_run:
-        console.print("[bold cyan]DRY-RUN mode — no files will be moved (use --apply)[/bold cyan]")
-
-    if interactive:
-        console.print(
-            "[bold magenta]Interactive mode — you will be prompted on ambiguous matches[/bold magenta]"
-        )
+    if not quiet:
+        if dry_run:
+            console.print(
+                "[bold cyan]DRY-RUN mode — no files will be moved (use --apply)[/bold cyan]"
+            )
+        if interactive:
+            console.print(
+                "[bold magenta]Interactive mode — you will be prompted on ambiguous matches[/bold magenta]"
+            )
 
     tmdb = _get_tmdb_client()
 
-    console.print(f"\nScanning [cyan]{source}[/cyan]...")
+    if not quiet:
+        console.print(f"\nScanning [cyan]{source}[/cyan]...")
     try:
         files = find_media_files(source)
     except (FileNotFoundError, NotADirectoryError) as exc:
@@ -222,8 +270,12 @@ def organize(
         console.print("[yellow]No media files found.[/yellow]")
         raise typer.Exit(0)
 
-    console.print(f"Found [bold]{len(files)}[/bold] media files. Querying TMDB...\n")
-    console.print(f"[dim]Cache: {cache_db}[/dim]\n")
+    if limit:
+        files = files[:limit]
+
+    if not quiet:
+        console.print(f"Found [bold]{len(files)}[/bold] media files. Querying TMDB...\n")
+        console.print(f"[dim]Cache: {cache_db}[/dim]\n")
 
     planned_moves: list[PlannedMove] = []
     junk_files: list[Path] = []
@@ -246,15 +298,17 @@ def organize(
             label = file.name if len(file.name) <= 55 else file.name[:52] + "..."
             progress.update(task, description=f"[cyan]{label}[/cyan]")
 
-            # Skip files already successfully moved in a previous run
-            if cache.already_moved(file):
-                console.print(f"[dim]SKIP (cached):[/dim] {file.name}")
+            # Skip files already successfully moved in a previous run (unless --force)
+            if not force and cache.already_moved(file):
+                if not quiet:
+                    console.print(f"[dim]SKIP (cached):[/dim] {file.name}")
                 progress.advance(task)
                 continue
 
             # Identify junk before any title parsing so junk never triggers a prompt
             if is_junk(file):
-                console.print(f"[dim]JUNK:[/dim] {file.name}")
+                if not quiet:
+                    console.print(f"[dim]JUNK:[/dim] {file.name}")
                 junk_files.append(file)
                 progress.advance(task)
                 continue
@@ -267,7 +321,8 @@ def organize(
 
             # Unknown type — skip or ask
             if guessed.media_type == MediaType.UNKNOWN:
-                console.print(f"[yellow]SKIP (unknown type):[/yellow] {file.name}")
+                if not quiet:
+                    console.print(f"[yellow]SKIP (unknown type):[/yellow] {file.name}")
                 planned_moves.append(
                     PlannedMove(
                         source=file,
@@ -307,7 +362,8 @@ def organize(
                         progress.advance(task)
                         continue
                 else:
-                    console.print(f"[yellow]SKIP (no title parsed):[/yellow] {file.name}")
+                    if not quiet:
+                        console.print(f"[yellow]SKIP (no title parsed):[/yellow] {file.name}")
                     planned_moves.append(
                         PlannedMove(
                             source=file,
@@ -329,9 +385,10 @@ def organize(
             # Check for a previously pinned interactive choice — skip TMDB entirely
             pinned = cache.get_pinned(guessed.title, _cache_year, guessed.media_type)
             if pinned:
-                console.print(
-                    f"[dim]PINNED:[/dim] {guessed.title} → {pinned.title} ({pinned.year})"
-                )
+                if not quiet:
+                    console.print(
+                        f"[dim]PINNED:[/dim] {guessed.title} → {pinned.title} ({pinned.year})"
+                    )
                 planned_moves.append(plan_move(guessed, pinned, dest, file))
                 progress.advance(task)
                 continue
@@ -489,9 +546,10 @@ def organize(
                     else:
                         al_matches = al_cached
                     if al_matches:
-                        console.print(
-                            f"[dim]TMDB missed '{guessed.title}' — trying AniList...[/dim]"
-                        )
+                        if not quiet:
+                            console.print(
+                                f"[dim]TMDB missed '{guessed.title}' — trying AniList...[/dim]"
+                            )
                         if interactive:
                             progress.stop()
                         match = _resolve_match(
@@ -508,11 +566,12 @@ def organize(
                     console.print(f"[dim]AniList fallback failed for '{file.name}': {exc}[/dim]")
 
             if not match and not interactive and matches:
-                console.print(
-                    f"[yellow]SKIP (ambiguous):[/yellow] '{guessed.title}' — "
-                    f"{len(matches)} TMDB results, none matched confidently. "
-                    "Run with --interactive to pick manually."
-                )
+                if not quiet:
+                    console.print(
+                        f"[yellow]SKIP (ambiguous):[/yellow] '{guessed.title}' — "
+                        f"{len(matches)} TMDB results, none matched confidently. "
+                        "Run with --interactive to pick manually."
+                    )
                 planned_moves.append(
                     PlannedMove(
                         source=file,
@@ -594,6 +653,109 @@ def organize(
     # Clean up empty source directories (in-place + apply only)
     if in_place and apply and cleanup_empty_dirs and not dry_run:
         _remove_empty_dirs(source)
+
+
+@app.command()
+def scan(
+    source: Annotated[Path, typer.Argument(help="Directory to scan")],
+) -> None:
+    """Parse filenames with guessit and print what was detected — no TMDB calls.
+
+    Useful for debugging why a filename is being misidentified.
+    """
+    from rich.table import Table
+
+    try:
+        files = find_media_files(source)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1) from exc
+
+    if not files:
+        console.print("[yellow]No media files found.[/yellow]")
+        raise typer.Exit(0)
+
+    table = Table(title=f"Parsed metadata — {source}", show_lines=False)
+    table.add_column("Filename", style="cyan", max_width=45)
+    table.add_column("Type", width=8)
+    table.add_column("Title", style="white", max_width=30)
+    table.add_column("Year", width=6)
+    table.add_column("S", width=4)
+    table.add_column("E", width=4)
+
+    for f in files:
+        g = guess(f)
+        table.add_row(
+            f.name,
+            g.media_type.value,
+            g.title or "[dim]—[/dim]",
+            str(g.year) if g.year else "[dim]—[/dim]",
+            str(g.season) if g.season is not None else "[dim]—[/dim]",
+            str(g.episode) if g.episode is not None else "[dim]—[/dim]",
+        )
+
+    console.print(table)
+
+
+# ── Cache subcommands ────────────────────────────────────────────────────────
+
+
+@cache_app.command("stats")
+def cache_stats(
+    cache_db: Annotated[Path, typer.Option("--cache-db")] = _DEFAULT_DB,
+) -> None:
+    """Show row counts for each cache table."""
+    cache = Cache(cache_db)
+    s = cache.stats()
+    cache.close()
+    console.print(f"  TMDB search cache : [bold]{s['tmdb_cache']}[/bold] entries")
+    console.print(f"  Pinned choices    : [bold]{s['pinned']}[/bold] entries")
+    console.print(f"  Move log          : [bold]{s['move_log']}[/bold] files")
+    console.print(f"  [dim]DB: {cache_db}[/dim]")
+
+
+@cache_app.command("unpin")
+def cache_unpin(
+    title: Annotated[str, typer.Argument(help="Show/movie title to unpin")],
+    media_type: Annotated[
+        MediaType, typer.Option("--type", "-t", help="Media type (movie or episode)")
+    ] = MediaType.EPISODE,
+    year: Annotated[int, typer.Option("--year", "-y", help="Year (movies only)")] = 0,
+    cache_db: Annotated[Path, typer.Option("--cache-db")] = _DEFAULT_DB,
+) -> None:
+    """Remove a pinned TMDB match so the title is re-prompted on next run."""
+    cache = Cache(cache_db)
+    removed = cache.unpin(title, year if year else None, media_type)
+    cache.close()
+    if removed:
+        console.print(f"[green]Unpinned:[/green] '{title}'")
+    else:
+        console.print(f"[yellow]Not found:[/yellow] no pinned entry for '{title}'")
+
+
+@cache_app.command("clear")
+def cache_clear(
+    pinned: Annotated[bool, typer.Option("--pinned", help="Clear pinned choices")] = False,
+    tmdb: Annotated[bool, typer.Option("--tmdb", help="Clear TMDB search cache")] = False,
+    moves: Annotated[bool, typer.Option("--moves", help="Clear move log")] = False,
+    all_tables: Annotated[bool, typer.Option("--all", help="Clear everything")] = False,
+    cache_db: Annotated[Path, typer.Option("--cache-db")] = _DEFAULT_DB,
+) -> None:
+    """Delete rows from the cache. Requires at least one --pinned/--tmdb/--moves/--all flag."""
+    if not any([pinned, tmdb, moves, all_tables]):
+        err_console.print(
+            "[bold red]Error:[/bold red] Specify at least one of --pinned, --tmdb, --moves, --all"
+        )
+        raise typer.Exit(1)
+    cache = Cache(cache_db)
+    deleted = cache.clear(
+        pinned=pinned or all_tables,
+        tmdb=tmdb or all_tables,
+        moves=moves or all_tables,
+    )
+    cache.close()
+    for table, count in deleted.items():
+        console.print(f"  [green]✓[/green] {table}: deleted [bold]{count}[/bold] rows")
 
 
 def _remove_empty_dirs(root: Path) -> None:

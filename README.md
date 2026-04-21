@@ -83,14 +83,36 @@ export ANTHROPIC_API_KEY=your_key_here  # optional — enables AI search fallbac
 # Dry run — shows what would happen, nothing is moved (default)
 uv run jellyfiler /path/to/messy/movies /path/to/output
 
-# Force all files to be treated as series episodes
-uv run jellyfiler /source /dest --type episode
+# Explicit dry-run flag (identical to the default, useful in scripts)
+uv run jellyfiler /source /dest --dry-run
 
 # Apply — actually move files (still interactive by default)
 uv run jellyfiler /source /dest --apply
 
+# Test against only the first 10 files before committing to a full run
+uv run jellyfiler /source /dest --limit 10
+
+# Re-process files already in the move log (undo a bad batch)
+uv run jellyfiler /source /dest --force
+
+# Suppress per-file output — show only the summary panel (good for large libraries)
+uv run jellyfiler /source /dest --quiet
+
+# Force all files to be treated as series episodes
+uv run jellyfiler /source /dest --type episode
+
 # Non-interactive — skip ambiguous matches instead of prompting (good for automation)
 uv run jellyfiler /source /dest --no-interactive --apply
+
+# Show version
+uv run jellyfiler --version
+```
+
+### Debugging filenames
+
+```bash
+# Parse filenames with guessit without hitting TMDB — useful when a file is misidentified
+uv run jellyfiler scan /path/to/source
 ```
 
 ### In-place mode
@@ -143,6 +165,23 @@ jellyfiler keeps a cache at `~/.cache/jellyfiler/cache.db` (created automaticall
 | Move history | Re-running the tool skips files already moved in a previous run. Safe to use as a resume mechanism if a run was interrupted. |
 
 Override the location with `--cache-db /path/to/custom.db`.
+
+### Cache management
+
+```bash
+# Show row counts for each cache table
+uv run jellyfiler cache stats
+
+# Remove a bad pinned match so the title is re-prompted on next run
+uv run jellyfiler cache unpin "Futurama" --type episode
+uv run jellyfiler cache unpin "Coco" --type movie --year 2017
+
+# Selectively clear parts of the cache
+uv run jellyfiler cache clear --pinned          # re-prompt all pinned titles
+uv run jellyfiler cache clear --moves           # re-process already-moved files
+uv run jellyfiler cache clear --tmdb            # force fresh TMDB lookups
+uv run jellyfiler cache clear --all             # full reset
+```
 
 ---
 

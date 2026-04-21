@@ -138,13 +138,16 @@ def report_junk(junk_files: list[Path], source_root: Path, dest_root: Path, dry_
         console.print("[dim]No junk files found.[/dim]")
         return
 
+    _JUNK_REPORT_LIMIT = 10
     action = "Would move" if dry_run else "Moving"
     console.print(
         f"\n[bold yellow]Junk files ({len(junk_files)}) — {action} to {dest_root / _JUNK_DIR_NAME}:[/bold yellow]"
     )
-    for f in junk_files:
+    for f in junk_files[:_JUNK_REPORT_LIMIT]:
         dest = junk_destination(f, source_root, dest_root)
         console.print(f"  [yellow]→[/yellow] {f.name}  [dim]→ {dest}[/dim]")
+    if len(junk_files) > _JUNK_REPORT_LIMIT:
+        console.print(f"  [dim]… and {len(junk_files) - _JUNK_REPORT_LIMIT} more[/dim]")
 
 
 def move_junk(junk_files: list[Path], source_root: Path, dest_root: Path) -> tuple[int, int]:

@@ -156,3 +156,43 @@ class Cache:
             (str(source), str(dest)),
         )
         self._conn.commit()
+
+    # ── Stats & management ────────────────────────────────────────────
+
+    def stats(self) -> dict[str, int]:
+        """Return row counts for each table."""
+        return {
+            "tmdb_cache": self._conn.execute("SELECT COUNT(*) FROM tmdb_cache").fetchone()[0],
+            "pinned": self._conn.execute("SELECT COUNT(*) FROM tmdb_pinned").fetchone()[0],
+            "move_log": self._conn.execute("SELECT COUNT(*) FROM move_log").fetchone()[0],
+        }
+
+    def unpin(self, title: str, year: int | None, media_type: MediaType) -> bool:
+        """Remove a single pinned entry. Returns True if a row was deleted."""
+        cur = self._conn.execute(
+            "DELETE FROM tmdb_pinned WHERE title_lower=? AND year IS ? AND media_type=?",
+            (title.lower(), year, media_type.value),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def clear(
+        self,
+        *,
+        pinned: bool = False,
+        tmdb: bool = False,
+        moves: bool = False,
+    ) -> dict[str, int]:
+        """Delete rows from the selected tables. Returns deleted row counts."""
+        deleted: dict[str, int] = {}
+        if pinned:
+            cur = self._conn.execute("DELETE FROM tmdb_pinned")
+            deleted["pinned"] = cur.rowcount
+        if tmdb:
+            cur = self._conn.execute("DELETE FROM tmdb_cache")
+            deleted["tmdb_cache"] = cur.rowcount
+        if moves:
+            cur = self._conn.execute("DELETE FROM move_log")
+            deleted["move_log"] = cur.rowcount
+        self._conn.commit()
+        return deleted
