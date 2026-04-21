@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
-from jellyfiler.ai_query import preflight_check, suggest_search
+from jellyfiler.ai_query import AiQueryError, preflight_check, suggest_search
 from jellyfiler.anilist import looks_like_anime, search_anime
 from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.executor import ExecutionError, execute
@@ -306,8 +306,7 @@ def organize(
     planned_moves: list[PlannedMove] = []
     junk_files: list[Path] = []
     tmdb_errors = 0
-    _tmdb_consecutive_server_errors = 0
-    _TMDB_CIRCUIT_BREAK = 3
+    ai_disabled = False  # set to True if user opts out mid-run after an AI error
     cache = Cache(cache_db)
 
     with Progress(
@@ -432,69 +431,20 @@ def organize(
                     # show's premiere year, which never matches a season folder year.
                     matches = tmdb.search_tv(guessed.title, None)
                     cache.set_tmdb(guessed.title, None, guessed.media_type, matches)
-                _tmdb_consecutive_server_errors = 0  # reset on success
-
             except httpx.HTTPStatusError as exc:
-                is_server_error = exc.response.status_code >= 500
+                progress.stop()
                 err_console.print(
-                    f"[red]TMDB error for '{file.name}': "
-                    f"{exc.response.status_code} {exc.response.reason_phrase}[/red]"
+                    f"\n[bold red]TMDB error: {exc.response.status_code} "
+                    f"{exc.response.reason_phrase} — stopping.[/bold red]"
                 )
                 tmdb_errors += 1
-                if is_server_error:
-                    _tmdb_consecutive_server_errors += 1
-                    if _tmdb_consecutive_server_errors >= _TMDB_CIRCUIT_BREAK:
-                        progress.stop()
-                        err_console.print(
-                            f"\n[bold red]TMDB is returning server errors — stopping after "
-                            f"{_tmdb_consecutive_server_errors} consecutive failures. "
-                            "Try again later.[/bold red]"
-                        )
-                        planned_moves.append(
-                            PlannedMove(
-                                source=file,
-                                destination=dest,
-                                media_type=guessed.media_type,
-                                tmdb_id=None,
-                                matched_title=guessed.title,
-                                confidence="low",
-                                skipped=True,
-                                skip_reason=f"TMDB server error: {exc.response.status_code}",
-                            )
-                        )
-                        break
-                planned_moves.append(
-                    PlannedMove(
-                        source=file,
-                        destination=dest,
-                        media_type=guessed.media_type,
-                        tmdb_id=None,
-                        matched_title=guessed.title,
-                        confidence="low",
-                        skipped=True,
-                        skip_reason=f"TMDB HTTP error: {exc.response.status_code}",
-                    )
-                )
-                progress.advance(task)
-                continue
+                break
 
             except Exception as exc:
-                err_console.print(f"[red]TMDB error for '{file.name}': {exc}[/red]")
+                progress.stop()
+                err_console.print(f"\n[bold red]TMDB error: {exc} — stopping.[/bold red]")
                 tmdb_errors += 1
-                planned_moves.append(
-                    PlannedMove(
-                        source=file,
-                        destination=dest,
-                        media_type=guessed.media_type,
-                        tmdb_id=None,
-                        matched_title=guessed.title,
-                        confidence="low",
-                        skipped=True,
-                        skip_reason=f"TMDB query failed: {exc}",
-                    )
-                )
-                progress.advance(task)
-                continue
+                break
 
             # Retry with title variants if no confident match on first search
             search_title = guessed.title
@@ -515,40 +465,57 @@ def organize(
                         pass
 
             # AI fallback: if all variants missed, ask Haiku for a better search query
-            if use_ai and not best_match(matches, search_title, guessed.year):
+            if use_ai and not ai_disabled and not best_match(matches, search_title, guessed.year):
                 ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
                 if ai_key:
-                    suggestion = suggest_search(
-                        file.parent.name,
-                        file.name,
-                        ai_key,
-                        is_tv=guessed.media_type == MediaType.EPISODE,
-                    )
-                    if suggestion:
-                        ai_title = str(suggestion.get("title", ""))
-                        ai_year_raw = suggestion.get("year")
-                        ai_year = (
-                            int(ai_year_raw) if isinstance(ai_year_raw, (int, float)) else None
+                    try:
+                        suggestion = suggest_search(
+                            file.parent.name,
+                            file.name,
+                            ai_key,
+                            is_tv=guessed.media_type == MediaType.EPISODE,
                         )
-                        if ai_title and ai_title != search_title:
-                            console.print(
-                                f"[dim]AI query suggestion for '{guessed.title}': "
-                                f"'{ai_title}' ({ai_year})[/dim]"
+                    except AiQueryError as exc:
+                        progress.stop()
+                        err_console.print(f"\n[bold red]Anthropic API error: {exc}[/bold red]")
+                        if interactive:
+                            disable = typer.confirm("Disable AI and continue without it?")
+                            if disable:
+                                ai_disabled = True
+                                suggestion = None
+                                progress.start()
+                            else:
+                                err_console.print("[bold red]Stopping.[/bold red]")
+                                break
+                        else:
+                            err_console.print("[bold red]Stopping.[/bold red]")
+                            break
+                    else:
+                        if suggestion:
+                            ai_title = str(suggestion.get("title", ""))
+                            ai_year_raw = suggestion.get("year")
+                            ai_year = (
+                                int(ai_year_raw) if isinstance(ai_year_raw, (int, float)) else None
                             )
-                            try:
-                                ai_retry = (
-                                    tmdb.search_movie(ai_title, ai_year)
-                                    if guessed.media_type == MediaType.MOVIE
-                                    else tmdb.search_tv(ai_title, None)
+                            if ai_title and ai_title != search_title:
+                                console.print(
+                                    f"[dim]AI query suggestion for '{guessed.title}': "
+                                    f"'{ai_title}' ({ai_year})[/dim]"
                                 )
-                                if ai_retry:
-                                    matches = ai_retry
-                                    search_title = ai_title
-                                    cache.set_tmdb(
-                                        ai_title, _cache_year, guessed.media_type, ai_retry
+                                try:
+                                    ai_retry = (
+                                        tmdb.search_movie(ai_title, ai_year)
+                                        if guessed.media_type == MediaType.MOVIE
+                                        else tmdb.search_tv(ai_title, None)
                                     )
-                            except Exception:
-                                pass
+                                    if ai_retry:
+                                        matches = ai_retry
+                                        search_title = ai_title
+                                        cache.set_tmdb(
+                                            ai_title, _cache_year, guessed.media_type, ai_retry
+                                        )
+                                except Exception:
+                                    pass
 
             if interactive:
                 progress.stop()

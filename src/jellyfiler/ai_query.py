@@ -20,6 +20,10 @@ _SYSTEM_MOVIE = 'Extract the movie title and release year from a release name. R
 _SYSTEM_TV = 'Extract the TV show title from a release name. Reply with ONLY JSON: {"title":"..."}'
 
 
+class AiQueryError(Exception):
+    """Raised when the Anthropic API call itself fails (auth, network, quota)."""
+
+
 def preflight_check(api_key: str) -> bool:
     """Send a minimal ping to Haiku and verify it responds with "true".
 
@@ -50,11 +54,9 @@ def suggest_search(
 ) -> dict[str, object] | None:
     """Ask Claude Haiku to parse a release name into a clean TMDB search query.
 
-    For movies returns {title, year}. For TV returns {title} only — year is
-    never passed to search_tv so there is no point asking for it.
-    Returns None on any error so the caller can silently continue.
-
-    Uses ANTHROPIC_API_KEY — not Bedrock — since this is a personal project.
+    For movies returns {title, year}. For TV returns {title} only.
+    Returns None when the model gives an unusable response (bad JSON, no title).
+    Raises AiQueryError when the API call itself fails (auth, network, quota).
     """
     if not _ANTHROPIC_AVAILABLE or _anthropic is None:
         return None
@@ -72,15 +74,19 @@ def suggest_search(
                 }
             ],
         )
-        block = message.content[0]
-        if not isinstance(block, _TextBlock):
-            return None
-        raw = block.text.strip()
-        # Strip markdown code fences if the model wraps the JSON
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL).strip()
+    except Exception as exc:
+        raise AiQueryError(str(exc)) from exc
+
+    block = message.content[0]
+    if not isinstance(block, _TextBlock):
+        return None
+    raw = block.text.strip()
+    # Strip markdown code fences if the model wraps the JSON
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL).strip()
+    try:
         data: dict[str, object] = json.loads(raw)
-        if not isinstance(data.get("title"), str) or not data["title"]:
-            return None
-        return data
     except Exception:
         return None
+    if not isinstance(data.get("title"), str) or not data["title"]:
+        return None
+    return data

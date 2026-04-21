@@ -6,8 +6,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import anthropic
+import pytest
 
-from jellyfiler.ai_query import _SYSTEM_MOVIE, _SYSTEM_TV, preflight_check, suggest_search
+from jellyfiler.ai_query import (
+    _SYSTEM_MOVIE,
+    _SYSTEM_TV,
+    AiQueryError,
+    preflight_check,
+    suggest_search,
+)
 
 
 def _make_response(text: str) -> MagicMock:
@@ -80,15 +87,15 @@ def test_suggest_search_strips_markdown_fences():
     assert result["title"] == "Blade Runner 2049"
 
 
-def test_suggest_search_returns_none_on_api_error():
+def test_suggest_search_raises_on_api_error():
     mock_module = MagicMock()
     mock_module.Anthropic.return_value.messages.create.side_effect = Exception("network error")
     with (
         patch("jellyfiler.ai_query._anthropic", mock_module),
         patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+        pytest.raises(AiQueryError),
     ):
-        result = suggest_search("folder", "file.mkv", "fake-key")
-    assert result is None
+        suggest_search("folder", "file.mkv", "fake-key")
 
 
 def test_suggest_search_returns_none_on_invalid_json():
@@ -142,6 +149,101 @@ def test_preflight_check_returns_false_on_api_error():
         patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
     ):
         assert preflight_check("bad-key") is False
+
+
+def test_tmdb_error_stops_the_run(tmp_path: Path):
+    """Any TMDB error must abort the loop — no further files processed."""
+    import httpx
+    from typer.testing import CliRunner
+
+    from jellyfiler.cli import app
+    from jellyfiler.guesser import GuessedMedia
+    from jellyfiler.models import MediaType
+
+    fake_file = tmp_path / "Movie.2020.mkv"
+    fake_file.touch()
+
+    guessed = GuessedMedia(
+        source_path=fake_file,
+        media_type=MediaType.MOVIE,
+        title="Movie",
+        year=2020,
+    )
+
+    mock_cache = MagicMock()
+    mock_cache.already_moved.return_value = False
+    mock_cache.get_pinned.return_value = None
+    mock_cache.get_tmdb.return_value = None
+
+    mock_response = MagicMock()
+    mock_response.status_code = 401
+    mock_response.reason_phrase = "Unauthorized"
+    mock_tmdb = MagicMock()
+    mock_tmdb.search_movie.side_effect = httpx.HTTPStatusError(
+        "401", request=MagicMock(), response=mock_response
+    )
+
+    with (
+        patch("jellyfiler.cli.find_media_files", return_value=[fake_file]),
+        patch("jellyfiler.cli.guess", return_value=guessed),
+        patch("jellyfiler.cli.Cache", return_value=mock_cache),
+        patch("jellyfiler.cli.TmdbClient", return_value=mock_tmdb),
+        patch.dict(os.environ, {"TMDB_API_KEY": "fake"}),
+    ):
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["organize", str(tmp_path), str(tmp_path / "dest"), "--no-interactive"],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code != 0 or "stopping" in result.output.lower()
+
+
+def test_ai_error_stops_non_interactive_run(tmp_path: Path):
+    """AiQueryError in non-interactive mode must abort the run."""
+    from typer.testing import CliRunner
+
+    from jellyfiler.cli import app
+    from jellyfiler.guesser import GuessedMedia
+    from jellyfiler.models import MediaType
+
+    fake_file = tmp_path / "Unknown.2020.mkv"
+    fake_file.touch()
+
+    guessed = GuessedMedia(
+        source_path=fake_file,
+        media_type=MediaType.MOVIE,
+        title="Unknown",
+        year=2020,
+    )
+
+    mock_cache = MagicMock()
+    mock_cache.already_moved.return_value = False
+    mock_cache.get_pinned.return_value = None
+    mock_cache.get_tmdb.return_value = None
+
+    mock_tmdb = MagicMock()
+    mock_tmdb.search_movie.return_value = []
+
+    with (
+        patch("jellyfiler.cli.preflight_check", return_value=True),
+        patch("jellyfiler.cli.find_media_files", return_value=[fake_file]),
+        patch("jellyfiler.cli.guess", return_value=guessed),
+        patch("jellyfiler.cli.Cache", return_value=mock_cache),
+        patch("jellyfiler.cli.TmdbClient", return_value=mock_tmdb),
+        patch("jellyfiler.cli.best_match", return_value=None),
+        patch("jellyfiler.cli.suggest_search", side_effect=AiQueryError("quota exceeded")),
+        patch.dict(os.environ, {"TMDB_API_KEY": "fake", "ANTHROPIC_API_KEY": "fake-ai-key"}),
+    ):
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["organize", str(tmp_path), str(tmp_path / "dest"), "--use-ai", "--no-interactive"],
+            catch_exceptions=False,
+        )
+
+    assert "quota exceeded" in result.output or "Stopping" in result.output
 
 
 def test_use_ai_aborts_when_key_missing():
