@@ -75,6 +75,20 @@ def _norm(s: str) -> str:
     return "".join(c for c in nfkd if not unicodedata.combining(c)).lower()
 
 
+def _norm_punct(s: str) -> str:
+    """Normalize title punctuation so & / ! : - all compare equal.
+
+    "Superman & Shazam - The Return of Black Adam"
+    vs "Superman/Shazam!: The Return of Black Adam" → both become
+    "superman shazam the return of black adam"
+    """
+    import re
+
+    s = _norm(s)
+    s = re.sub(r"[&/!:,\-_]+", " ", s)
+    return " ".join(s.split())
+
+
 def best_match(
     matches: list[TmdbMatch],
     guessed_title: str,
@@ -87,6 +101,8 @@ def best_match(
     2. Exact title, any year
     3. Guessed title is a prefix/substring of a TMDB title, same year
     4. Guessed title is a prefix/substring of the top result, any year
+    5. Punct-normalized exact match + year  (& vs / vs : vs - treated equal)
+    6. Punct-normalized exact match, any year
     """
     if not matches:
         return None
@@ -115,5 +131,14 @@ def best_match(
     ft = _norm(first.title)
     if g in ft or ft in g:
         return first
+
+    # 5 & 6. Punct-normalized exact match — catches & vs / vs : vs - variations
+    gp = _norm_punct(guessed_title)
+    for m in matches:
+        if _norm_punct(m.title) == gp and m.year == guessed_year:
+            return m
+    for m in matches:
+        if _norm_punct(m.title) == gp:
+            return m
 
     return None
