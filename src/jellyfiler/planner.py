@@ -27,7 +27,9 @@ def _episode_destination(
     """Jellyfin episode convention: Show Name/Season XX/S01E01.ext"""
     show_name = _safe_name(match.title)
     season = guessed.season or 1
-    episode = guessed.episode or 1
+    episode = guessed.episode  # intentionally not defaulted — callers must resolve first
+    if episode is None:
+        raise ValueError(f"episode number is unknown for '{source.name}'")
     season_folder = f"Season {season:02d}"
     if guessed.episode_end is not None and guessed.episode_end != episode:
         episode_file = (
@@ -59,6 +61,20 @@ def plan_move(
     if guessed.media_type == MediaType.MOVIE:
         destination = _movie_destination(dest_root, match, source)
     elif guessed.media_type == MediaType.EPISODE:
+        if guessed.episode is None:
+            return PlannedMove(
+                source=source,
+                destination=dest_root,
+                media_type=guessed.media_type,
+                tmdb_id=match.tmdb_id,
+                matched_title=match.title,
+                confidence="low",
+                skipped=True,
+                skip_reason=(
+                    f"No episode number found for '{source.name}' — "
+                    "run with --interactive to pick manually"
+                ),
+            )
         destination = _episode_destination(dest_root, match, guessed, source)
     else:
         return PlannedMove(

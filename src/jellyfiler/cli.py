@@ -15,7 +15,7 @@ from jellyfiler.anilist import looks_like_anime, search_anime
 from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.executor import ExecutionError, execute
 from jellyfiler.guesser import guess
-from jellyfiler.interactive import prompt_manual_title, prompt_tmdb_match
+from jellyfiler.interactive import prompt_episode_number, prompt_manual_title, prompt_tmdb_match
 from jellyfiler.junk import is_junk, move_junk, report_junk
 from jellyfiler.models import MediaType, PlannedMove
 from jellyfiler.planner import build_plan, plan_move
@@ -490,6 +490,25 @@ def organize(
                 )
                 progress.advance(task)
                 continue
+
+            # Bare episode file (no S/E marker) — ask user to identify the episode
+            if (
+                match is not None
+                and guessed.media_type == MediaType.EPISODE
+                and guessed.episode is None
+                and interactive
+            ):
+                progress.stop()
+                try:
+                    season_num = guessed.season or 1
+                    episodes = tmdb.get_season_episodes(match.tmdb_id, season_num)
+                    if episodes:
+                        picked = prompt_episode_number(file.name, episodes)
+                        if picked is not None:
+                            guessed.episode = picked
+                except Exception as exc:
+                    console.print(f"[dim]Could not fetch episode list: {exc}[/dim]")
+                progress.start()
 
             if interactive and match is None and not matches:
                 progress.stop()

@@ -64,6 +64,51 @@ def prompt_tmdb_match(
     return None
 
 
+def prompt_episode_number(
+    filename: str,
+    episodes: list[tuple[int, str]],
+) -> int | None:
+    """Show a numbered list of episode titles and ask the user to pick one.
+
+    Returns the episode number (not the list index), or None if the user skips.
+    """
+    console.print(
+        f"\n[bold yellow]No episode number found for:[/bold yellow] [cyan]{filename}[/cyan]"
+    )
+    console.print("  Pick the episode from the season list below:\n")
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Ep", width=5)
+    table.add_column("Title")
+
+    display = episodes[:20]
+    for i, (ep_num, ep_title) in enumerate(display, start=1):
+        table.add_row(str(i), str(ep_num), ep_title)
+
+    console.print(table)
+    console.print("[dim]Enter a list number to select, 0 to skip, or press Enter to skip.[/dim]")
+
+    raw = typer.prompt("Choice", default="0")
+    try:
+        choice = int(raw.strip())
+    except ValueError:
+        console.print("[yellow]Invalid input — skipping.[/yellow]")
+        return None
+
+    if choice == 0 or not raw.strip():
+        console.print("[yellow]Skipped.[/yellow]")
+        return None
+
+    if 1 <= choice <= len(display):
+        ep_num, ep_title = display[choice - 1]
+        console.print(f"[green]Selected:[/green] E{ep_num:02d} — {ep_title}")
+        return ep_num
+
+    console.print("[yellow]Out of range — skipping.[/yellow]")
+    return None
+
+
 def prompt_manual_title(filename: str, guessed_title: str) -> str | None:
     """Ask the user to provide or confirm a title when guessit fails."""
     console.print(

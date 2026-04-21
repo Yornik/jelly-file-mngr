@@ -41,6 +41,15 @@ class TmdbClient:
             for r in results
         ]
 
+    def get_season_episodes(self, show_id: int, season: int) -> list[tuple[int, str]]:
+        """Return [(episode_number, episode_name), ...] for a season."""
+        data = self._get(f"/tv/{show_id}/season/{season}", {})
+        return [
+            (int(ep["episode_number"]), ep.get("name", ""))
+            for ep in data.get("episodes", [])
+            if ep.get("episode_number") is not None
+        ]
+
     def search_tv(self, title: str, year: int | None = None) -> list[TmdbMatch]:
         params: dict[str, Any] = {"query": title}
         if year:
