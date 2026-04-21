@@ -51,6 +51,34 @@ def test_episode_destination():
     assert dest == Path("/dest/Futurama/Season 12/S12E03.mkv")
 
 
+def test_episode_destination_multi_episode():
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S03E01E02.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=3,
+        episode=1,
+        episode_end=2,
+    )
+    dest = _episode_destination(Path("/dest"), match, guessed, Path("Futurama.S03E01E02.mkv"))
+    assert dest == Path("/dest/Futurama/Season 03/S03E01-E02.mkv")
+
+
+def test_episode_destination_multi_episode_three():
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("Show.S03E01E02E03.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Show",
+        season=3,
+        episode=1,
+        episode_end=3,
+    )
+    dest = _episode_destination(Path("/dest"), match, guessed, Path("Show.S03E01E02E03.mkv"))
+    assert dest == Path("/dest/Futurama/Season 03/S03E01-E03.mkv")
+
+
 def test_episode_destination_pads_single_digit():
     match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
     guessed = GuessedMedia(

@@ -29,7 +29,12 @@ def _episode_destination(
     season = guessed.season or 1
     episode = guessed.episode or 1
     season_folder = f"Season {season:02d}"
-    episode_file = f"S{season:02d}E{episode:02d}{source.suffix.lower()}"
+    if guessed.episode_end is not None and guessed.episode_end != episode:
+        episode_file = (
+            f"S{season:02d}E{episode:02d}-E{guessed.episode_end:02d}{source.suffix.lower()}"
+        )
+    else:
+        episode_file = f"S{season:02d}E{episode:02d}{source.suffix.lower()}"
     return dest_root / show_name / season_folder / episode_file
 
 
