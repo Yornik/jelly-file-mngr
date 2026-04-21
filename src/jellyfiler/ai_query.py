@@ -7,10 +7,12 @@ import re
 
 try:
     import anthropic as _anthropic
+    from anthropic.types import TextBlock as _TextBlock
 
     _ANTHROPIC_AVAILABLE = True
 except ImportError:
     _anthropic = None  # type: ignore[assignment]
+    _TextBlock = None  # type: ignore[assignment,misc]
     _ANTHROPIC_AVAILABLE = False
 
 
@@ -48,7 +50,10 @@ def suggest_search(
                 }
             ],
         )
-        raw = message.content[0].text.strip()
+        block = message.content[0]
+        if not isinstance(block, _TextBlock):
+            return None
+        raw = block.text.strip()
         # Strip markdown code fences if the model wraps the JSON
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL).strip()
         data: dict[str, object] = json.loads(raw)

@@ -3,12 +3,15 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import anthropic
+
 from jellyfiler.ai_query import _SYSTEM_MOVIE, _SYSTEM_TV, suggest_search
 
 
 def _make_response(text: str) -> MagicMock:
     msg = MagicMock()
-    msg.content = [MagicMock(text=text)]
+    block = anthropic.types.TextBlock(type="text", text=text)
+    msg.content = [block]
     return msg
 
 
