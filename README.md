@@ -19,7 +19,13 @@ Files named after an episode title with no `S/E` marker (`Luck of the Fryrish.mk
 After each video move, subtitle files sharing the same stem (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`, `.sup`) are moved alongside and renamed to match the destination. Language codes are preserved: `episode.en.srt` → `S01E05.en.srt`.
 
 ### Claude Haiku AI search fallback
-When all title-variant retries fail to find a TMDB match, the tool can send the raw release directory and filename to `claude-haiku-4-5` for a clean search query. Set `ANTHROPIC_API_KEY` to enable — silently skipped otherwise. The prompt is a single system instruction + the two raw strings, keeping token usage minimal across large libraries.
+When all title-variant retries fail to find a TMDB match, pass `--use-ai` to send the raw release directory and filename to `claude-haiku-4-5` for a clean search query. Requires `ANTHROPIC_API_KEY` — the flag is always opt-in so tokens are never spent without explicit intent.
+
+Before scanning any files, `--use-ai` runs a preflight check: it verifies the key is set and that Haiku responds correctly. If either fails, the run aborts immediately with a clear error.
+
+API errors during a run (bad key, quota, network) stop the run in `--no-interactive` mode. In interactive mode you are prompted to disable AI and continue without it.
+
+The prompt is a single system instruction + the two raw strings, keeping token usage minimal across large libraries.
 
 ---
 
@@ -78,35 +84,35 @@ uv sync
 
 ```bash
 export TMDB_API_KEY=your_key_here
-export ANTHROPIC_API_KEY=your_key_here  # optional — enables AI search fallback
+export ANTHROPIC_API_KEY=your_key_here  # required only when using --use-ai
 
 # Dry run — shows what would happen, nothing is moved (default)
-uv run jellyfiler /path/to/messy/movies /path/to/output
+uv run jellyfiler organize /path/to/messy/movies /path/to/output
 
 # Explicit dry-run flag (identical to the default, useful in scripts)
-uv run jellyfiler /source /dest --dry-run
+uv run jellyfiler organize /source /dest --dry-run
 
 # Apply — actually move files (still interactive by default)
-uv run jellyfiler /source /dest --apply
+uv run jellyfiler organize /source /dest --apply
 
 # Test against only the first 10 files before committing to a full run
-uv run jellyfiler /source /dest --limit 10
+uv run jellyfiler organize /source /dest --limit 10
 
 # Re-process files already in the move log (undo a bad batch)
-uv run jellyfiler /source /dest --force
+uv run jellyfiler organize /source /dest --force
 
 # Suppress per-file output — show only the summary panel (good for large libraries)
-uv run jellyfiler /source /dest --quiet
+uv run jellyfiler organize /source /dest --quiet
 
 # Force all files to be treated as series episodes
-uv run jellyfiler /source /dest --type episode
+uv run jellyfiler organize /source /dest --type episode
 
 # Non-interactive — skip ambiguous matches instead of prompting (good for automation)
-uv run jellyfiler /source /dest --no-interactive --apply
+uv run jellyfiler organize /source /dest --no-interactive --apply
 
 # Enable Claude Haiku AI fallback for titles that defeat all other parsing
 # (requires ANTHROPIC_API_KEY — off by default to avoid unintentional spend)
-uv run jellyfiler /source /dest --use-ai --apply
+uv run jellyfiler organize /source /dest --use-ai --apply
 
 # Show version
 uv run jellyfiler --version
@@ -119,6 +125,15 @@ uv run jellyfiler --version
 uv run jellyfiler scan /path/to/source
 ```
 
+Prints a table of what guessit detected for every media file in the directory:
+
+| Filename | Type | Title | Year | S | E |
+|---|---|---|---|---|---|
+| Futurama.S12E01.1080p.x265.mkv | episode | Futurama | — | 12 | 1 |
+| Blade.Runner.2049.2017.mkv | movie | Blade Runner 2049 | 2017 | — | — |
+
+No TMDB calls are made. Use this to check why a file is being misidentified before running `organize`.
+
 ### In-place mode
 
 Reorganize within the source directory itself — no separate destination needed.
@@ -126,13 +141,13 @@ Useful when `movies/` and `series/` are already separate and you just want clean
 
 ```bash
 # Dry run in-place
-uv run jellyfiler /media/movies --in-place
+uv run jellyfiler organize /media/movies --in-place
 
 # Apply in-place
-uv run jellyfiler /media/movies --in-place --apply
+uv run jellyfiler organize /media/movies --in-place --apply
 
 # Apply in-place and remove leftover empty release folders
-uv run jellyfiler /media/movies --in-place --apply --cleanup-empty-dirs
+uv run jellyfiler organize /media/movies --in-place --apply --cleanup-empty-dirs
 ```
 
 Before:
