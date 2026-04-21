@@ -109,6 +109,16 @@ def test_plan_move_episode_sets_destination():
     assert result.destination == Path("/dest/Futurama/Season 12/S12E03.mkv")
 
 
+def test_plan_move_episode_no_episode_number_is_skipped():
+    """Episode matched on TMDB but filename had no S/E marker — should skip, not default to E01."""
+    guessed = _guessed(MediaType.EPISODE, "Futurama", season=3, episode=None)
+    match = TmdbMatch(tmdb_id=2, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    result = plan_move(guessed, match, Path("/dest"), Path("Luck of the Fryrish.mkv"))
+    assert result.skipped
+    assert "No episode number" in result.skip_reason
+    assert "--interactive" in result.skip_reason
+
+
 def test_plan_move_unknown_type_is_skipped():
     guessed = _guessed(MediaType.UNKNOWN)
     match = TmdbMatch(tmdb_id=3, title="Test", year=None, media_type=MediaType.UNKNOWN)
