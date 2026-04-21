@@ -100,6 +100,24 @@ def guess(path: Path) -> GuessedMedia:
             elif raw == "episode":
                 media_type = MediaType.EPISODE
 
+        # If the parent is a season folder (has season number but no show title, e.g. "Season 02")
+        # AND the file itself had no season number (so it's a bare episode file, not a well-named
+        # S01E01 file that already carries the show title), walk up ancestor directories to find
+        # the first one that guessit resolves to a meaningful title.
+        # This covers Show/Season N/bare-episode.mp4 where the episode filename is just the
+        # episode title and the show name lives further up the path.
+        if not dir_title and dir_season is not None and not file_result.get("season"):
+            for ancestor in path.parents[1:]:
+                anc_name = ancestor.name
+                if not anc_name or anc_name in {".", ""}:
+                    break
+                anc_result = _parse_name(anc_name)
+                _, anc_title, _, _, _, _ = _extract(anc_result)
+                if anc_title:
+                    title = anc_title
+                    media_type = MediaType.EPISODE
+                    break
+
     return GuessedMedia(
         source_path=path,
         media_type=media_type,
