@@ -651,9 +651,14 @@ def organize(
             if interactive and match is None and not matches:
                 progress.start()
 
-            # Pin confirmed match so future runs skip the prompt
+            # Pin confirmed match so future runs skip the prompt.
+            # Also pin under the original guessed title when the AI or a variant
+            # rewrite found the match — otherwise the same raw title triggers
+            # another AI call on the next file.
             if match:
                 cache.set_pinned(search_title, _cache_year, guessed.media_type, match)
+                if search_title != guessed.title:
+                    cache.set_pinned(guessed.title, _cache_year, guessed.media_type, match)
 
             progress.advance(task)
 
