@@ -85,16 +85,57 @@ uv sync
 ```bash
 export TMDB_API_KEY=your_key_here
 export ANTHROPIC_API_KEY=your_key_here  # required only when using --use-ai
+```
 
-# Dry run — shows what would happen, nothing is moved (default)
+### In-place mode (most common)
+
+Reorganize within the directory itself — no separate destination needed. This is the typical workflow when your `movies/` and `series/` folders are already separate and you just want clean Jellyfin structure inside each.
+
+```bash
+# Dry run — shows what would happen and how many empty dirs would be cleaned up
+uv run jellyfiler organize /media/movies --in-place --cleanup-empty-dirs
+
+# Apply — actually move files and remove leftover empty release folders
+uv run jellyfiler organize /media/movies --in-place --apply --cleanup-empty-dirs
+```
+
+Before:
+```
+movies/
+  Blade.Runner.2049.2017.Hybrid.2160p.UHD.Blu-ray.Remux.HEVC.DV.HDR.TrueHD.7.1.Atmos-HDT.mkv
+  Futurama.S12.1080p.x265-ELiTE/
+    Futurama.S12E01.1080p.x265-ELiTE.mkv
+```
+
+After:
+```
+movies/
+  Blade Runner 2049 (2017)/
+    Blade Runner 2049 (2017).mkv
+  Futurama/
+    Season 12/
+      S12E01.mkv
+```
+
+> **Note:** `--cleanup-empty-dirs` uses `rmdir` — only truly empty directories are removed.
+> Non-empty directories (e.g. a release folder that still has subtitle files) are left untouched.
+> In dry-run mode the summary shows how many directories *would* be removed.
+
+### Source → destination mode
+
+Move files from a messy source into a separate, clean destination root.
+
+```bash
+# Dry run
 uv run jellyfiler organize /path/to/messy/movies /path/to/output
 
-# Explicit dry-run flag (identical to the default, useful in scripts)
-uv run jellyfiler organize /source /dest --dry-run
-
-# Apply — actually move files (still interactive by default)
+# Apply
 uv run jellyfiler organize /source /dest --apply
+```
 
+### All options
+
+```bash
 # Test against only the first 10 files before committing to a full run
 uv run jellyfiler organize /source /dest --limit 10
 
@@ -133,43 +174,6 @@ Prints a table of what guessit detected for every media file in the directory:
 | Blade.Runner.2049.2017.mkv | movie | Blade Runner 2049 | 2017 | — | — |
 
 No TMDB calls are made. Use this to check why a file is being misidentified before running `organize`.
-
-### In-place mode
-
-Reorganize within the source directory itself — no separate destination needed.
-Useful when `movies/` and `series/` are already separate and you just want clean structure inside each.
-
-```bash
-# Dry run in-place
-uv run jellyfiler organize /media/movies --in-place
-
-# Apply in-place
-uv run jellyfiler organize /media/movies --in-place --apply
-
-# Apply in-place and remove leftover empty release folders
-uv run jellyfiler organize /media/movies --in-place --apply --cleanup-empty-dirs
-```
-
-Before:
-```
-movies/
-  Blade.Runner.2049.2017.Hybrid.2160p.UHD.Blu-ray.Remux.HEVC.DV.HDR.TrueHD.7.1.Atmos-HDT.mkv
-  Futurama.S12.1080p.x265-ELiTE/
-    Futurama.S12E01.1080p.x265-ELiTE.mkv
-```
-
-After:
-```
-movies/
-  Blade Runner 2049 (2017)/
-    Blade Runner 2049 (2017).mkv
-  Futurama/
-    Season 12/
-      S12E01.mkv
-```
-
-> **Note:** `--cleanup-empty-dirs` uses `rmdir` which only removes truly empty directories.
-> Non-empty directories (e.g. a release folder that still has subtitle files) are left untouched.
 
 ---
 
