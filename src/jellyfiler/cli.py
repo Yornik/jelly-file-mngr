@@ -136,6 +136,23 @@ def _fmt_size(total_bytes: int) -> str:
     return f"{total_bytes:.0f} TB"
 
 
+def _simulate_empty_dirs(source: Path, files_leaving: set[Path]) -> int:
+    """Count directories that would become empty after files_leaving are removed."""
+    remaining = {f for f in source.rglob("*") if f.is_file() and f not in files_leaving}
+    would_remove: set[Path] = set()
+    for dirpath in sorted(source.rglob("*"), reverse=True):
+        if dirpath == source or not dirpath.is_dir():
+            continue
+        has_content = any(
+            c
+            for c in dirpath.iterdir()
+            if (c.is_file() and c in remaining) or (c.is_dir() and c not in would_remove)
+        )
+        if not has_content:
+            would_remove.add(dirpath)
+    return len(would_remove)
+
+
 def _print_summary(
     planned: int,
     skipped: int,
@@ -143,12 +160,16 @@ def _print_summary(
     junk_bytes: int,
     tmdb_errors: int,
     dry_run: bool,
+    empty_dirs: int = 0,
 ) -> None:
     lines = [
         f"  [green]✓[/green]  Planned moves   [bold]{planned:>5}[/bold]",
         f"  [yellow]⚠[/yellow]  Skipped         [bold]{skipped:>5}[/bold]",
         f"  [dim]🗑  Junk files     [bold]{junk_count:>5}[/bold]  ({_fmt_size(junk_bytes)})[/dim]",
     ]
+    if empty_dirs:
+        label = "Empty dirs (sim)" if dry_run else "Empty dirs removed"
+        lines.append(f"  [dim]📁  {label}[bold]{empty_dirs:>5}[/bold][/dim]")
     if tmdb_errors:
         lines.append(f"  [red]✗[/red]  TMDB errors     [bold]{tmdb_errors:>5}[/bold]")
     if dry_run:
@@ -630,6 +651,15 @@ def organize(
         err_console.print(f"\n[bold red]{exc}[/bold red]")
         raise typer.Exit(1) from exc
 
+    # Empty-dir cleanup or simulation (in-place only)
+    empty_dirs_count = 0
+    if in_place and cleanup_empty_dirs:
+        if dry_run:
+            files_leaving = {m.source for m in plan.moves} | set(junk_files)
+            empty_dirs_count = _simulate_empty_dirs(source, files_leaving)
+        else:
+            empty_dirs_count = _remove_empty_dirs(source)
+
     _print_summary(
         planned=len(plan.moves),
         skipped=len(plan.skipped),
@@ -637,15 +667,12 @@ def organize(
         junk_bytes=junk_bytes,
         tmdb_errors=tmdb_errors,
         dry_run=dry_run,
+        empty_dirs=empty_dirs_count,
     )
 
     if tmdb_errors:
         err_console.print(f"\n[yellow]{tmdb_errors} TMDB error(s) occurred — see above.[/yellow]")
         raise typer.Exit(1)
-
-    # Clean up empty source directories (in-place + apply only)
-    if in_place and apply and cleanup_empty_dirs and not dry_run:
-        _remove_empty_dirs(source)
 
 
 @app.command()
@@ -751,21 +778,17 @@ def cache_clear(
         console.print(f"  [green]✓[/green] {table}: deleted [bold]{count}[/bold] rows")
 
 
-def _remove_empty_dirs(root: Path) -> None:
-    """Recursively remove empty directories under root (but not root itself)."""
+def _remove_empty_dirs(root: Path) -> int:
+    """Recursively remove empty directories under root (but not root itself). Returns count removed."""
     removed = 0
-    # Walk bottom-up so children are processed before parents
     for dirpath in sorted(root.rglob("*"), reverse=True):
         if dirpath == root:
             continue
         if dirpath.is_dir():
             try:
-                dirpath.rmdir()  # only succeeds if directory is empty
+                dirpath.rmdir()
                 console.print(f"[dim]Removed empty dir: {dirpath}[/dim]")
                 removed += 1
             except OSError:
-                pass  # not empty, skip
-    if removed:
-        console.print(
-            f"[dim]Cleaned up {removed} empty director{'y' if removed == 1 else 'ies'}.[/dim]"
-        )
+                pass
+    return removed
