@@ -8,6 +8,7 @@ Data safety rules:
 - All moves are logged before execution.
 """
 
+import re
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,6 +17,10 @@ from rich.console import Console
 from rich.table import Table
 
 from jellyfiler.models import MediaType, Plan, PlannedMove
+from jellyfiler.scanner import SUBTITLE_EXTENSIONS
+
+# ISO 639-1/639-2 language code: 2-3 lowercase letters
+_LANG_CODE = re.compile(r"^[a-z]{2,3}$")
 
 if TYPE_CHECKING:
     from jellyfiler.cache import Cache
@@ -31,6 +36,42 @@ _TYPE_ICON = {
 
 class ExecutionError(Exception):
     """Raised when a safety check fails before or during execution."""
+
+
+def _subtitle_companions(source: Path) -> list[Path]:
+    """Return subtitle files in the same directory that share source's stem.
+
+    Matches exact stem (``episode.srt``) and stem-plus-lang-code (``episode.en.srt``).
+    """
+    stem = source.stem
+    companions = []
+    for candidate in source.parent.iterdir():
+        if candidate.suffix.lower() not in SUBTITLE_EXTENSIONS:
+            continue
+        # exact match: episode.srt
+        if candidate.stem == stem:
+            companions.append(candidate)
+            continue
+        # lang-code match: episode.en.srt → inner_stem="episode", lang="en"
+        inner = Path(candidate.stem)
+        if inner.stem == stem and _LANG_CODE.match(inner.suffix.lstrip(".")):
+            companions.append(candidate)
+    return companions
+
+
+def _move_subtitle(sub: Path, dest_video: Path) -> None:
+    """Move a subtitle file next to dest_video, renaming it to match the video stem."""
+    video_stem = dest_video.stem
+    # Preserve language code if present: episode.en.srt → lang_suffix=".en"
+    inner = Path(sub.stem)
+    lang_suffix = inner.suffix if _LANG_CODE.match(inner.suffix.lstrip(".")) else ""
+    sub_dest = dest_video.parent / f"{video_stem}{lang_suffix}{sub.suffix.lower()}"
+    if sub_dest.exists():
+        console.print(f"[dim]  subtitle already exists, skipping: {sub_dest.name}[/dim]")
+        return
+    sub_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(sub), str(sub_dest))
+    console.print(f"[dim]  subtitle:[/dim] {sub.name}  →  {sub_dest.name}")
 
 
 def _preflight(moves: list[PlannedMove]) -> list[str]:
@@ -111,11 +152,17 @@ def execute(
                 failed += 1
                 continue
 
+            subs = _subtitle_companions(move.source)
             shutil.move(str(move.source), str(move.destination))
             console.print(f"[green]✓[/green] {move.source.name}  →  {move.destination}")
             if cache is not None:
                 cache.record_move(move.source, move.destination)
             moved += 1
+            for sub in subs:
+                try:
+                    _move_subtitle(sub, move.destination)
+                except Exception as exc:
+                    console.print(f"[yellow]  subtitle move failed:[/yellow] {sub.name} — {exc}")
 
         except Exception as exc:
             console.print(f"[red]✗ FAILED:[/red] {move.source.name} — {exc}")
