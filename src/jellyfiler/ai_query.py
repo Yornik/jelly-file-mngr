@@ -34,7 +34,7 @@ def suggest_search(
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=64,
-            system='Extract TMDB search metadata from a release name. Reply with ONLY JSON: {"title":"...","year":null,"media_type":"movie","season":null}',
+            system='Extract TMDB search metadata from a release name. Reply with ONLY JSON: {"title":"...","year":null,"media_type":"movie or episode","season":null}',
             messages=[
                 {
                     "role": "user",
