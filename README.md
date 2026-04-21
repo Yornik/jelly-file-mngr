@@ -7,6 +7,22 @@ Organize a messy library of media rips into a [Jellyfin](https://jellyfin.org/)-
 
 ---
 
+## Features
+
+### Multi-episode files
+Files spanning multiple episodes (`Show.S03E01E02.mkv`) are renamed to Jellyfin's expected `S03E01-E02.mkv` format rather than silently dropping the second episode.
+
+### Bare episode filenames
+Files named after an episode title with no `S/E` marker (`Luck of the Fryrish.mkv`) no longer collapse every file in the folder to `S01E01.mkv`. In `--interactive` mode, after the show is matched on TMDB, the season episode list is fetched and shown so you can identify the correct episode by title.
+
+### Subtitle sidecars
+After each video move, subtitle files sharing the same stem (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`, `.sup`) are moved alongside and renamed to match the destination. Language codes are preserved: `episode.en.srt` → `S01E05.en.srt`.
+
+### Claude Haiku AI search fallback
+When all title-variant retries fail to find a TMDB match, the tool can send the raw release directory and filename to `claude-haiku-4-5` for a clean search query. Set `ANTHROPIC_API_KEY` to enable — silently skipped otherwise. The prompt is a single system instruction + the two raw strings, keeping token usage minimal across large libraries.
+
+---
+
 ## What it does
 
 Takes a source directory like:
@@ -62,6 +78,7 @@ uv sync
 
 ```bash
 export TMDB_API_KEY=your_key_here
+export ANTHROPIC_API_KEY=your_key_here  # optional — enables AI search fallback
 
 # Dry run — shows what would happen, nothing is moved (default)
 uv run jellyfiler /path/to/messy/movies /path/to/output

@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 
+from jellyfiler.ai_query import suggest_search
 from jellyfiler.anilist import looks_like_anime, search_anime
 from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.executor import ExecutionError, execute
@@ -429,6 +430,42 @@ def organize(
                             break
                     except Exception:
                         pass
+
+            # AI fallback: if all variants missed, ask Haiku for a better search query
+            if not best_match(matches, search_title, guessed.year):
+                ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
+                if ai_key:
+                    suggestion = suggest_search(
+                        file.parent.name,
+                        file.name,
+                        ai_key,
+                        is_tv=guessed.media_type == MediaType.EPISODE,
+                    )
+                    if suggestion:
+                        ai_title = str(suggestion.get("title", ""))
+                        ai_year_raw = suggestion.get("year")
+                        ai_year = (
+                            int(ai_year_raw) if isinstance(ai_year_raw, (int, float)) else None
+                        )
+                        if ai_title and ai_title != search_title:
+                            console.print(
+                                f"[dim]AI query suggestion for '{guessed.title}': "
+                                f"'{ai_title}' ({ai_year})[/dim]"
+                            )
+                            try:
+                                ai_retry = (
+                                    tmdb.search_movie(ai_title, ai_year)
+                                    if guessed.media_type == MediaType.MOVIE
+                                    else tmdb.search_tv(ai_title, None)
+                                )
+                                if ai_retry:
+                                    matches = ai_retry
+                                    search_title = ai_title
+                                    cache.set_tmdb(
+                                        ai_title, _cache_year, guessed.media_type, ai_retry
+                                    )
+                            except Exception:
+                                pass
 
             if interactive:
                 progress.stop()
