@@ -24,8 +24,19 @@ S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
 
 Useful when people browse the SMB share directly rather than through Jellyfin. Jellyfin itself reads the `SxxExx` pattern and is happy with either format.
 
-### Duplicate handling
-When two source files would land at the same destination (e.g. a 1080p and a 720p of the same episode), jellyfiler decides what to do based on flags:
+### Duplicate handling — `dedupe` subcommand
+When two source files would land at the same destination (e.g. a 1080p and a 720p of the same episode), use the `dedupe` subcommand to resolve them. `organize` itself just skips duplicates with a hint pointing here.
+
+```bash
+# Interactive prompt per duplicate pair (default)
+uv run jellyfiler dedupe /source /dest
+
+# Auto-keep highest quality, quarantine losers (recoverable, cron-friendly)
+uv run jellyfiler dedupe /source /dest --quarantine-duplicates --apply
+
+# Auto-keep highest quality, PERMANENTLY DELETE losers (cron-friendly with double-flag safety)
+uv run jellyfiler dedupe /source /dest --remove-duplicates --i-mean-it --apply
+```
 
 | Flag(s) | Behaviour | Reversible? |
 |---|---|---|
@@ -37,6 +48,9 @@ When two source files would land at the same destination (e.g. a 1080p and a 720
 Quality ranking: filename resolution tag (2160p > 1080p > 720p > 480p) is the primary key, file size on disk is the tiebreaker.
 
 `--remove-duplicates` without `--i-mean-it` aborts with a big red warning — there is no "delete by accident" path.
+
+### TMDB rate limiting
+The TMDB client throttles outbound requests to **40 RPS** by default — comfortably below TMDB's documented 50 RPS cap on free API keys, with a buffer for clock drift and burstiness. If TMDB returns `429 Too Many Requests`, the client honours the `Retry-After` header and retries once. Configurable via `TmdbClient(rps=...)` if you have a paid plan with higher limits; set `rps=0` to disable.
 
 ### Subtitle sidecars
 After each video move, subtitle files sharing the same stem (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`, `.sup`) are moved alongside and renamed to match the destination. Language codes are preserved: `episode.en.srt` → `S01E05.en.srt`.
@@ -153,13 +167,9 @@ uv run jellyfiler organize /source /dest --no-interactive --apply
 # e.g. S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
 uv run jellyfiler organize /source /dest --rich-names --apply
 
-# Auto-resolve duplicate destinations — keep highest quality, quarantine
-# losers to dest/.junk/duplicates/ (recoverable, cron-friendly)
-uv run jellyfiler organize /source /dest --quarantine-duplicates --apply
-
-# Auto-resolve duplicate destinations — keep highest quality, PERMANENTLY
-# DELETE losers. Double-flag required to prevent accidents.
-uv run jellyfiler organize /source /dest --remove-duplicates --i-mean-it --apply
+# Resolve duplicate destinations — see the dedupe subcommand below for details
+uv run jellyfiler dedupe /source /dest --quarantine-duplicates --apply
+uv run jellyfiler dedupe /source /dest --remove-duplicates --i-mean-it --apply
 
 # Enable Claude Haiku AI fallback for titles that defeat all other parsing
 # (requires ANTHROPIC_API_KEY — off by default to avoid unintentional spend)

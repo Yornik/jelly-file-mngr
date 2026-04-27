@@ -1,6 +1,15 @@
-"""TMDB API client — search for movies and TV shows."""
+"""TMDB API client — search for movies and TV shows.
 
-from dataclasses import dataclass
+Rate limiting
+-------------
+TMDB's documented limit on free API keys is 50 requests per second per key.
+The client throttles to a configurable rate (default 40 RPS — comfortably
+below the cap so we don't get clipped by clock drift or bursts) and also
+honours a 429 ``Retry-After`` response header by sleeping and retrying once.
+"""
+
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -12,18 +21,50 @@ __all__ = ["TmdbClient", "TmdbMatch", "best_match"]
 TMDB_BASE = "https://api.themoviedb.org/3"
 _REQUEST_TIMEOUT = 10
 
+# Default rate limit: 40 requests per second, well under TMDB's documented 50 RPS cap
+# for free API keys. One extra request per second of headroom against burstiness.
+_DEFAULT_RPS = 40.0
+
 
 @dataclass
 class TmdbClient:
     api_key: str
+    # Max requests per second this client will issue. Set to 0 to disable throttling.
+    rps: float = _DEFAULT_RPS
+    # Internal: monotonic timestamp of the last completed request (or 0 if none yet).
+    _last_request_at: float = field(default=0.0, init=False, repr=False)
+
+    def _wait_for_rate_limit(self) -> None:
+        """Sleep just enough to keep our outbound rate under ``self.rps``."""
+        if self.rps <= 0:
+            return
+        min_interval = 1.0 / self.rps
+        elapsed = time.monotonic() - self._last_request_at
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
 
     def _get(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
         params = {"api_key": self.api_key, **params}
-        with httpx.Client(timeout=_REQUEST_TIMEOUT) as client:
-            response = client.get(f"{TMDB_BASE}{endpoint}", params=params)
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        url = f"{TMDB_BASE}{endpoint}"
+        for attempt in range(2):  # at most one retry on 429
+            self._wait_for_rate_limit()
+            with httpx.Client(timeout=_REQUEST_TIMEOUT) as client:
+                response = client.get(url, params=params)
+            self._last_request_at = time.monotonic()
+            if response.status_code == 429 and attempt == 0:
+                # TMDB tells us how long to wait; default to 1s if header is missing.
+                retry_after_header = response.headers.get("Retry-After", "1")
+                try:
+                    retry_after = float(retry_after_header)
+                except ValueError:
+                    retry_after = 1.0
+                time.sleep(retry_after)
+                continue
+            response.raise_for_status()
+            result: dict[str, Any] = response.json()
+            return result
+        # Unreachable: the loop either returns or raises before exiting.
+        raise RuntimeError("TMDB request retry loop exited unexpectedly")
 
     def search_movie(self, title: str, year: int | None = None) -> list[TmdbMatch]:
         params: dict[str, Any] = {"query": title, "include_adult": "false"}
