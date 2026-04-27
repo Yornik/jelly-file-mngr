@@ -8,6 +8,7 @@ below the cap so we don't get clipped by clock drift or bursts) and also
 honours a 429 ``Retry-After`` response header by sleeping and retrying once.
 """
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,17 +32,28 @@ class TmdbClient:
     api_key: str
     # Max requests per second this client will issue. Set to 0 to disable throttling.
     rps: float = _DEFAULT_RPS
-    # Internal: monotonic timestamp of the last completed request (or 0 if none yet).
-    _last_request_at: float = field(default=0.0, init=False, repr=False)
+    # Internal: monotonic timestamp of the next slot we're allowed to use.
+    # Tracking "next slot" instead of "last request" lets the lock cover the
+    # reservation atomically even when N threads call concurrently.
+    _next_slot_at: float = field(default=0.0, init=False, repr=False)
+    _slot_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def _wait_for_rate_limit(self) -> None:
-        """Sleep just enough to keep our outbound rate under ``self.rps``."""
+        """Reserve the next time slot under our RPS budget and sleep until it.
+
+        Thread-safe: under contention, N concurrent callers each get a unique
+        slot N intervals apart, so the global outbound rate never exceeds rps.
+        """
         if self.rps <= 0:
             return
         min_interval = 1.0 / self.rps
-        elapsed = time.monotonic() - self._last_request_at
-        if elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
+        with self._slot_lock:
+            now = time.monotonic()
+            slot = max(self._next_slot_at, now)
+            self._next_slot_at = slot + min_interval
+        wait = slot - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
 
     def _get(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
         params = {"api_key": self.api_key, **params}
@@ -50,7 +62,6 @@ class TmdbClient:
             self._wait_for_rate_limit()
             with httpx.Client(timeout=_REQUEST_TIMEOUT) as client:
                 response = client.get(url, params=params)
-            self._last_request_at = time.monotonic()
             if response.status_code == 429 and attempt == 0:
                 # TMDB tells us how long to wait; default to 1s if header is missing.
                 retry_after_header = response.headers.get("Retry-After", "1")
