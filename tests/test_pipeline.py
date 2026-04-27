@@ -1494,6 +1494,263 @@ def test_lookup_chain_ai_retry_exception_swallowed(tmp_path: Path):
     assert out.status == "ok"
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Parallel pipeline (phase 1 → parallel phase 2 → phase 3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_classify_file_cached(tmp_path: Path):
+    from jellyfiler.cli import _classify_file
+
+    ctx = _ctx(tmp_path)
+    ctx.cache.already_moved.return_value = True
+    f = tmp_path / "x.mkv"
+    f.touch()
+    cf = _classify_file(f, ctx)
+    assert cf.kind == "cached"
+
+
+def test_classify_file_junk(tmp_path: Path):
+    from jellyfiler.cli import _classify_file
+
+    ctx = _ctx(tmp_path)
+    f = tmp_path / "Sample.mkv"
+    f.touch()
+    cf = _classify_file(f, ctx)
+    assert cf.kind == "junk"
+
+
+def test_classify_file_unknown_type_returns_skipped(tmp_path: Path):
+    from jellyfiler.cli import _classify_file
+
+    ctx = _ctx(tmp_path)
+    f = tmp_path / "weird.mkv"
+    f.touch()
+    with patch(
+        "jellyfiler.cli.guess",
+        return_value=GuessedMedia(source_path=f, media_type=MediaType.UNKNOWN, title=""),
+    ):
+        cf = _classify_file(f, ctx)
+    assert cf.kind == "skipped"
+    assert cf.move is not None and cf.move.skipped
+
+
+def test_classify_file_pinned_returns_resolved_move(tmp_path: Path):
+    from jellyfiler.cli import _classify_file
+
+    ctx = _ctx(tmp_path)
+    ctx.cache.get_pinned.return_value = _tmdb_match()
+    f = tmp_path / "Show.S01E01.mkv"
+    f.touch()
+    cf = _classify_file(f, ctx)
+    assert cf.kind == "pinned"
+    assert cf.move is not None and not cf.move.skipped
+
+
+def test_classify_file_needs_lookup(tmp_path: Path):
+    from jellyfiler.cli import _classify_file
+
+    ctx = _ctx(tmp_path)
+    f = tmp_path / "Show.S01E01.mkv"
+    f.touch()
+    cf = _classify_file(f, ctx)
+    assert cf.kind == "needs_lookup"
+    assert cf.guessed is not None
+    assert cf.move is None
+
+
+def test_finalize_after_lookup_tmdb_error_propagates(tmp_path: Path):
+    from jellyfiler.cli import ClassifiedFile, _finalize_after_lookup
+
+    ctx = _ctx(tmp_path)
+    cf = ClassifiedFile(file=tmp_path / "x.mkv", kind="needs_lookup", guessed=_episode())
+    out = _finalize_after_lookup(cf, LookupResult(status="tmdb_error", error_msg="boom"), ctx)
+    assert out.kind == "tmdb_error"
+
+
+def test_finalize_after_lookup_ai_abort_propagates(tmp_path: Path):
+    from jellyfiler.cli import ClassifiedFile, _finalize_after_lookup
+
+    ctx = _ctx(tmp_path)
+    cf = ClassifiedFile(file=tmp_path / "x.mkv", kind="needs_lookup", guessed=_episode())
+    out = _finalize_after_lookup(cf, LookupResult(status="ai_abort", error_msg="quota"), ctx)
+    assert out.kind == "ai_abort"
+
+
+def test_finalize_after_lookup_planned_with_match(tmp_path: Path):
+    from jellyfiler.cli import ClassifiedFile, _finalize_after_lookup
+
+    ctx = _ctx(tmp_path)
+    cf = ClassifiedFile(file=tmp_path / "x.mkv", kind="needs_lookup", guessed=_episode())
+    match = _tmdb_match()
+    with patch("jellyfiler.cli._resolve_match", return_value=match):
+        out = _finalize_after_lookup(
+            cf,
+            LookupResult(matches=[match], search_title="Show", status="ok"),
+            ctx,
+        )
+    assert out.kind == "planned"
+    assert out.move is not None
+
+
+def test_run_pipeline_parallel_same_results_as_sequential(tmp_path: Path):
+    """Parallel pipeline must produce the same plan as sequential, just faster."""
+    from jellyfiler.cli import _run_pipeline
+
+    src = tmp_path / "src"
+    src.mkdir()
+    files = []
+    for i in range(5):
+        f = src / f"Show.S01E{i:02d}.mkv"
+        f.touch()
+        files.append(f)
+
+    fake_match = _tmdb_match()
+    ctx_seq = _ctx(tmp_path)
+    ctx_seq.cache.get_pinned.return_value = fake_match
+    ctx_par = _ctx(tmp_path)
+    ctx_par.cache.get_pinned.return_value = fake_match
+    ctx_par.parallel = 4
+
+    seq_result = _run_pipeline(files, ctx_seq)
+    par_result = _run_pipeline(files, ctx_par)
+
+    # Same plan size, same sources (order may differ in par_result.planned_moves
+    # but with all-pinned matches, both should be sequential by construction)
+    assert len(seq_result.planned_moves) == len(par_result.planned_moves)
+    seq_sources = sorted(m.source for m in seq_result.planned_moves)
+    par_sources = sorted(m.source for m in par_result.planned_moves)
+    assert seq_sources == par_sources
+
+
+def test_run_pipeline_parallel_dispatches_to_threads(tmp_path: Path):
+    """Phase 2 actually uses a ThreadPoolExecutor when parallel > 1."""
+    import threading
+
+    from jellyfiler.cli import _run_pipeline
+
+    src = tmp_path / "src"
+    src.mkdir()
+    files = [src / f"Show.S01E{i:02d}.mkv" for i in range(3)]
+    for f in files:
+        f.touch()
+
+    seen_threads: set[str] = set()
+    main_thread = threading.current_thread().name
+
+    def lookup_side_effect(*args, **kwargs):
+        seen_threads.add(threading.current_thread().name)
+        return LookupResult(matches=[_tmdb_match()], search_title="Show", status="ok")
+
+    ctx = _ctx(tmp_path)
+    ctx.parallel = 4
+    with (
+        patch("jellyfiler.cli._lookup_match_chain", side_effect=lookup_side_effect),
+        patch("jellyfiler.cli._resolve_match", return_value=_tmdb_match()),
+    ):
+        _run_pipeline(files, ctx)
+
+    # At least one lookup must have happened on a non-main thread.
+    assert any(t != main_thread for t in seen_threads), f"all threads were main: {seen_threads}"
+
+
+def test_run_pipeline_parallel_aborts_on_tmdb_error(tmp_path: Path):
+    """A tmdb_error result in phase 3 still aborts the run."""
+    from jellyfiler.cli import _run_pipeline
+
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "Show.S01E01.mkv"
+    f.touch()
+
+    ctx = _ctx(tmp_path)
+    ctx.parallel = 2
+    with patch(
+        "jellyfiler.cli._lookup_match_chain",
+        return_value=LookupResult(status="tmdb_error", error_msg="boom"),
+    ):
+        result = _run_pipeline([f], ctx)
+    assert result.aborted
+    assert result.tmdb_errors == 1
+
+
+def test_run_pipeline_parallel_aborts_on_ai_abort(tmp_path: Path):
+    from jellyfiler.cli import _run_pipeline
+
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "Show.S01E01.mkv"
+    f.touch()
+
+    ctx = _ctx(tmp_path)
+    ctx.parallel = 2
+    with patch(
+        "jellyfiler.cli._lookup_match_chain",
+        return_value=LookupResult(status="ai_abort", error_msg="quota"),
+    ):
+        result = _run_pipeline([f], ctx)
+    assert result.aborted
+
+
+def test_run_pipeline_parallel_worker_exception_records_tmdb_error(tmp_path: Path):
+    """If a worker thread throws an exception, the file gets a tmdb_error result."""
+    from jellyfiler.cli import _run_pipeline
+
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "Show.S01E01.mkv"
+    f.touch()
+
+    ctx = _ctx(tmp_path)
+    ctx.parallel = 2
+    with patch(
+        "jellyfiler.cli._lookup_match_chain",
+        side_effect=RuntimeError("worker crashed"),
+    ):
+        result = _run_pipeline([f], ctx)
+    assert result.aborted
+    assert result.tmdb_errors == 1
+
+
+def test_run_pipeline_parallel_no_lookup_files_skips_phase_2(tmp_path: Path):
+    """If every file is cached/junk/pinned, phase 2 doesn't fire."""
+    from jellyfiler.cli import _run_pipeline
+
+    src = tmp_path / "src"
+    src.mkdir()
+    junk = src / "Sample.mkv"
+    junk.touch()
+    cached = src / "Show.S01E01.mkv"
+    cached.touch()
+
+    ctx = _ctx(tmp_path)
+    ctx.parallel = 4
+    ctx.cache.already_moved.side_effect = lambda f: f == cached
+
+    with patch("jellyfiler.cli._lookup_match_chain") as mock_lookup:
+        result = _run_pipeline([junk, cached], ctx)
+    mock_lookup.assert_not_called()
+    assert result.junk_files == [junk]
+
+
+def test_lookup_chain_skips_ai_prompt_in_parallel_mode(tmp_path: Path):
+    """In parallel mode, AI errors must abort instead of prompting (no shared stdin)."""
+    from jellyfiler.ai_query import AiQueryError
+
+    ctx = _ctx(tmp_path, use_ai=True, interactive=True)
+    ctx.parallel = 4  # parallel mode
+    ctx.tmdb.search_tv.return_value = []
+    g = GuessedMedia(source_path=Path("x.mkv"), media_type=MediaType.EPISODE, title="weird")
+    with (
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
+        patch("jellyfiler.cli.suggest_search", side_effect=AiQueryError("net")),
+        patch("jellyfiler.cli.typer.confirm") as mock_confirm,
+    ):
+        out = _lookup_match_chain(g, Path("x.mkv"), ctx)
+    assert out.status == "ai_abort"
+    mock_confirm.assert_not_called()  # crucial: no interactive prompt in parallel
+
+
 def test_organize_tmdb_error_exits_one(tmp_path: Path):
     """When _process_one_file returns tmdb_error, organize exits with code 1."""
     src = tmp_path / "src"

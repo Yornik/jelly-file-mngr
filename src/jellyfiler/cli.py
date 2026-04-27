@@ -19,7 +19,7 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
 import typer
@@ -192,6 +192,11 @@ class OrganizeContext:
     All the per-file branches in ``_process_one_file`` look up their dependencies
     here instead of taking ten parameters. Mutable state (``ai_disabled``) lives
     here too so the caller can see updates.
+
+    ``parallel`` controls the TMDB-lookup worker pool size. 1 = sequential
+    (default, identical to the pre-parallel behaviour); higher = use that many
+    threads for the network-bound lookup chain. Phase 1 (file classification)
+    and phase 3 (interactive resolution) always run on the main thread.
     """
 
     source: Path
@@ -205,6 +210,27 @@ class OrganizeContext:
     quiet: bool
     force: bool
     ai_disabled: bool = False  # toggled to True if the user opts out mid-run
+    parallel: int = 1
+
+
+@dataclass
+class ClassifiedFile:
+    """Phase-1 outcome — what we know about a file before any TMDB call.
+
+    ``kind`` is one of:
+        ``cached``        — already moved in a prior run, skip silently
+        ``junk``          — junk filter matched, will be moved to .junk/
+        ``skipped``       — pre-decided skip (unknown type, no title, ...);
+                            ``move`` carries the skipped PlannedMove
+        ``pinned``        — TMDB lookup short-circuits via cache.get_pinned();
+                            ``move`` carries the resolved PlannedMove
+        ``needs_lookup``  — phase-2 must run the TMDB chain on ``guessed``
+    """
+
+    file: Path
+    kind: str
+    guessed: GuessedMedia | None = None  # set for needs_lookup
+    move: PlannedMove | None = None  # set for skipped / pinned
 
 
 @dataclass
@@ -420,7 +446,10 @@ def _lookup_match_chain(
                 )
             except AiQueryError as exc:
                 err_console.print(f"\n[bold red]Anthropic API error: {exc}[/bold red]")
-                if ctx.interactive:
+                # Parallel mode: skip the interactive disable prompt — multiple
+                # worker threads can't share stdin. Treat as fatal; user can
+                # retry without --use-ai or with --parallel 1.
+                if ctx.interactive and ctx.parallel <= 1:
                     if progress is not None:
                         progress.stop()
                     disable = typer.confirm("Disable AI and continue without it?")
@@ -496,39 +525,47 @@ def _skipped_move(
     )
 
 
-def _process_one_file(
+def _classify_file(
     file: Path,
     ctx: OrganizeContext,
     progress: Progress | None = None,
-) -> FileResult:
-    """Run scan→junk→guess→TMDB→plan for one file. Pure-ish: no executor calls.
+) -> ClassifiedFile:
+    """Phase 1: fast, sequential classification.
 
-    The caller (organize / dedupe) is responsible for tracking the result and
-    deciding what to do with it (junk list, planned-moves list, abort, etc.).
+    Runs the cheap parts (cache lookup, junk filter, guessit parse) and decides
+    whether the file:
+      * is already done / junk → no further work
+      * has a pre-resolved skip reason → done with a skipped PlannedMove
+      * has a pinned TMDB match → done with the resolved PlannedMove
+      * needs the (slow, network-bound) TMDB chain in phase 2
+
+    The interactive "missing title" prompt also fires here — it's the only
+    interactive prompt that gates the lookup, so it must run before phase 2.
     """
-    # 1. Cached skip — file was already moved in a previous run
+    # 1. Cached skip
     if not ctx.force and ctx.cache.already_moved(file):
         if not ctx.quiet:
             console.print(f"[dim]SKIP (cached):[/dim] {file.name}")
-        return FileResult(kind="cached")
+        return ClassifiedFile(file=file, kind="cached")
 
     # 2. Junk filter
     if is_junk(file):
         if not ctx.quiet:
             console.print(f"[dim]JUNK:[/dim] {file.name}")
-        return FileResult(kind="junk")
+        return ClassifiedFile(file=file, kind="junk")
 
     # 3. Guess
     guessed = guess(file)
     if ctx.forced_media_type != MediaType.UNKNOWN:
         guessed.media_type = ctx.forced_media_type
 
-    # 4. Unknown type — skip
+    # 4. Unknown type — skipped move
     if guessed.media_type == MediaType.UNKNOWN:
         if not ctx.quiet:
             console.print(f"[yellow]SKIP (unknown type):[/yellow] {file.name}")
-        return FileResult(
-            kind="planned",
+        return ClassifiedFile(
+            file=file,
+            kind="skipped",
             move=_skipped_move(
                 file,
                 ctx.dest,
@@ -538,7 +575,7 @@ def _process_one_file(
             ),
         )
 
-    # 5. Missing title — interactive prompt or skip
+    # 5. Missing title — interactive prompt or skip (interactive runs on main thread)
     if not guessed.title:
         if ctx.interactive:
             if progress is not None:
@@ -549,8 +586,9 @@ def _process_one_file(
             if manual:
                 guessed.title = manual
             else:
-                return FileResult(
-                    kind="planned",
+                return ClassifiedFile(
+                    file=file,
+                    kind="skipped",
                     move=_skipped_move(
                         file,
                         ctx.dest,
@@ -562,8 +600,9 @@ def _process_one_file(
         else:
             if not ctx.quiet:
                 console.print(f"[yellow]SKIP (no title parsed):[/yellow] {file.name}")
-            return FileResult(
-                kind="planned",
+            return ClassifiedFile(
+                file=file,
+                kind="skipped",
                 move=_skipped_move(
                     file,
                     ctx.dest,
@@ -575,24 +614,46 @@ def _process_one_file(
 
     cache_year = guessed.year if guessed.media_type == MediaType.MOVIE else None
 
-    # 6. Pinned cache hit — skip TMDB entirely
+    # 6. Pinned cache hit
     pinned = ctx.cache.get_pinned(guessed.title, cache_year, guessed.media_type)
     if pinned:
         if not ctx.quiet:
             console.print(f"[dim]PINNED:[/dim] {guessed.title} → {pinned.title} ({pinned.year})")
-        return FileResult(
-            kind="planned",
+        return ClassifiedFile(
+            file=file,
+            kind="pinned",
+            guessed=guessed,
             move=plan_move(guessed, pinned, ctx.dest, file, rich_names=ctx.rich_names),
         )
 
-    # 7. TMDB + variant + AniList + AI chain
-    lookup = _lookup_match_chain(guessed, file, ctx, progress=progress)
+    # 7. Needs the TMDB lookup chain
+    return ClassifiedFile(file=file, kind="needs_lookup", guessed=guessed)
+
+
+def _finalize_after_lookup(
+    classified: ClassifiedFile,
+    lookup: LookupResult,
+    ctx: OrganizeContext,
+    progress: Progress | None = None,
+) -> FileResult:
+    """Phase 3: turn (classified file + lookup result) into a FileResult.
+
+    Runs match resolution (which may prompt interactively for ambiguous matches),
+    the bare-episode prompt, and the final ``plan_move`` + ``set_pinned`` call.
+    Always runs on the main thread so interactive prompts work.
+    """
+    file = classified.file
+    guessed = classified.guessed
+    assert guessed is not None  # invariant: needs_lookup → guessed is set
+
     if lookup.status == "tmdb_error":
         return FileResult(kind="tmdb_error", error_msg=lookup.error_msg)
     if lookup.status == "ai_abort":
         return FileResult(kind="ai_abort", error_msg=lookup.error_msg)
 
-    # 8. Resolve match (interactive prompt if ambiguous)
+    cache_year = guessed.year if guessed.media_type == MediaType.MOVIE else None
+
+    # Resolve match (interactive prompt if ambiguous)
     if ctx.interactive and progress is not None:
         progress.stop()
     match = _resolve_match(
@@ -606,7 +667,7 @@ def _process_one_file(
     if ctx.interactive and progress is not None:
         progress.start()
 
-    # 9. Non-interactive ambiguous → skip
+    # Non-interactive ambiguous → skip
     if not match and not ctx.interactive and lookup.matches:
         if not ctx.quiet:
             console.print(
@@ -625,7 +686,7 @@ def _process_one_file(
             ),
         )
 
-    # 10. Bare-episode interactive prompt
+    # Bare-episode interactive prompt
     if (
         match is not None
         and guessed.media_type == MediaType.EPISODE
@@ -646,11 +707,35 @@ def _process_one_file(
         if progress is not None:
             progress.start()
 
-    # 11. Plan + pin
+    # Plan + pin
     move = plan_move(guessed, match, ctx.dest, file, rich_names=ctx.rich_names)
     if match:
         ctx.cache.set_pinned(lookup.search_title, cache_year, guessed.media_type, match)
     return FileResult(kind="planned", move=move)
+
+
+def _process_one_file(
+    file: Path,
+    ctx: OrganizeContext,
+    progress: Progress | None = None,
+) -> FileResult:
+    """Sequential per-file processing: phase 1 → phase 2 → phase 3.
+
+    Used by the sequential pipeline runner. The parallel runner calls phase 1
+    and phase 3 directly so it can fan phase 2 out across worker threads.
+    """
+    classified = _classify_file(file, ctx, progress=progress)
+    if classified.kind == "cached":
+        return FileResult(kind="cached")
+    if classified.kind == "junk":
+        return FileResult(kind="junk")
+    if classified.kind in ("skipped", "pinned"):
+        assert classified.move is not None
+        return FileResult(kind="planned", move=classified.move)
+    # needs_lookup
+    assert classified.guessed is not None
+    lookup = _lookup_match_chain(classified.guessed, file, ctx, progress=progress)
+    return _finalize_after_lookup(classified, lookup, ctx, progress=progress)
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -669,7 +754,13 @@ class PipelineResult:
 
 
 def _run_pipeline(files: list[Path], ctx: OrganizeContext) -> PipelineResult:
-    """Run :func:`_process_one_file` over each input file with a progress bar."""
+    """Run :func:`_process_one_file` over each input file with a progress bar.
+
+    Dispatches to :func:`_run_pipeline_parallel` when ``ctx.parallel > 1``.
+    """
+    if ctx.parallel > 1:
+        return _run_pipeline_parallel(files, ctx)
+
     out = PipelineResult()
     with Progress(
         SpinnerColumn(),
@@ -699,6 +790,99 @@ def _run_pipeline(files: list[Path], ctx: OrganizeContext) -> PipelineResult:
                 break
             # 'cached' — silently skip
             progress.advance(task)
+    return out
+
+
+def _run_pipeline_parallel(files: list[Path], ctx: OrganizeContext) -> PipelineResult:
+    """Three-phase pipeline that parallelises the TMDB lookup phase.
+
+    Phase 1: classify every file sequentially (cache, junk, guess, pinned, ...).
+    Phase 2: fan TMDB lookups out across ``ctx.parallel`` worker threads.
+    Phase 3: walk back through the classifications in order, attaching the
+             lookup result and running the interactive resolution path.
+
+    Output ordering is preserved by walking ``classifications`` in input order
+    in phase 3 — even though phase 2 completes futures out of order.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    out = PipelineResult()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        # ── Phase 1: classify ──────────────────────────────────────────────
+        classify_task = progress.add_task("Classifying files...", total=len(files))
+        classifications: list[ClassifiedFile] = []
+        for file in files:
+            label = file.name if len(file.name) <= 55 else file.name[:52] + "..."
+            progress.update(classify_task, description=f"[cyan]{label}[/cyan]")
+            classifications.append(_classify_file(file, ctx, progress=progress))
+            progress.advance(classify_task)
+
+        # ── Phase 2: parallel TMDB lookups ──────────────────────────────────
+        needs_lookup = [cf for cf in classifications if cf.kind == "needs_lookup"]
+        lookup_results: dict[Path, LookupResult] = {}
+
+        if needs_lookup:
+            lookup_task = progress.add_task(
+                f"TMDB lookups (×{ctx.parallel} parallel)...", total=len(needs_lookup)
+            )
+            workers = max(1, ctx.parallel)
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tmdb") as ex:
+                # Submit all and collect by ClassifiedFile. Filter out the
+                # impossible "needs_lookup with no guessed" case for the type checker.
+                future_to_cf: dict[Any, ClassifiedFile] = {}
+                for cf in needs_lookup:
+                    assert cf.guessed is not None  # invariant of needs_lookup
+                    future_to_cf[ex.submit(_lookup_match_chain, cf.guessed, cf.file, ctx, None)] = (
+                        cf
+                    )
+                from concurrent.futures import as_completed
+
+                for fut in as_completed(future_to_cf):
+                    cf = future_to_cf[fut]
+                    try:
+                        lookup_results[cf.file] = fut.result()
+                    except Exception as exc:
+                        # A worker raised — record as tmdb_error so phase 3 aborts cleanly.
+                        lookup_results[cf.file] = LookupResult(
+                            status="tmdb_error", error_msg=str(exc)
+                        )
+                    progress.advance(lookup_task)
+
+        # ── Phase 3: finalize in original order ────────────────────────────
+        finalize_task = progress.add_task("Finalizing matches...", total=len(classifications))
+        for cf in classifications:
+            progress.advance(finalize_task)
+            if cf.kind == "cached":
+                continue
+            if cf.kind == "junk":
+                out.junk_files.append(cf.file)
+                continue
+            if cf.kind in ("skipped", "pinned"):
+                assert cf.move is not None
+                out.planned_moves.append(cf.move)
+                continue
+            # needs_lookup
+            lookup = lookup_results[cf.file]
+            result = _finalize_after_lookup(cf, lookup, ctx, progress=progress)
+            if result.kind == "tmdb_error":
+                out.tmdb_errors += 1
+                out.aborted = True
+                break
+            if result.kind == "ai_abort":
+                err_console.print("[bold red]Stopping.[/bold red]")
+                out.aborted = True
+                break
+            if result.kind == "planned" and result.move is not None:
+                out.planned_moves.append(result.move)
+
     return out
 
 
@@ -933,12 +1117,27 @@ def organize(
             help="Enable Claude Haiku AI fallback (requires ANTHROPIC_API_KEY).",
         ),
     ] = False,
+    parallel: Annotated[
+        int,
+        typer.Option(
+            "--parallel",
+            "-j",
+            help=(
+                "Run TMDB lookups in parallel with N worker threads (1 = sequential). "
+                "TMDB caps free keys at 50 RPS so the client throttles globally; "
+                "values around 8-16 give the best speedup on large libraries."
+            ),
+        ),
+    ] = 1,
 ) -> None:
     """Scan SOURCE, match against TMDB, and organize into DEST.
 
     Files that would collide on the same destination are skipped silently —
     use the ``dedupe`` subcommand to clean those up.
     """
+    if parallel < 1:
+        err_console.print("[bold red]Error:[/bold red] --parallel must be >= 1.")
+        raise typer.Exit(1)
     dest = _validate_in_place_args(in_place, dest, source, cleanup_empty_dirs)
     dry_run = not apply or dry_run_flag
     _ai_preflight(use_ai, quiet)
@@ -986,6 +1185,7 @@ def organize(
         rich_names=rich_names,
         quiet=quiet,
         force=force,
+        parallel=parallel,
     )
 
     pipeline = _run_pipeline(files, ctx)
@@ -1085,6 +1285,17 @@ def dedupe(
     quiet: Annotated[
         bool, typer.Option("--quiet", "-q", help="Suppress per-file output; show summary only.")
     ] = False,
+    parallel: Annotated[
+        int,
+        typer.Option(
+            "--parallel",
+            "-j",
+            help=(
+                "Run TMDB lookups in parallel with N worker threads (1 = sequential). "
+                "Values around 8-16 give the best speedup; capped by TMDB's 50 RPS limit."
+            ),
+        ),
+    ] = 1,
 ) -> None:
     """Find and resolve duplicate-destination files in SOURCE.
 
@@ -1093,6 +1304,9 @@ def dedupe(
     (interactive prompt, quarantine, or delete). Winning copies stay in SOURCE
     untouched — use ``organize`` afterwards to move them to DEST.
     """
+    if parallel < 1:
+        err_console.print("[bold red]Error:[/bold red] --parallel must be >= 1.")
+        raise typer.Exit(1)
     _validate_dedupe_flags(remove_duplicates, i_mean_it, quarantine_duplicates)
     dry_run = not apply
 
@@ -1122,6 +1336,7 @@ def dedupe(
         rich_names=False,
         quiet=quiet,
         force=True,  # in dedupe we don't skip already-moved files (we want to find dupes)
+        parallel=parallel,
     )
 
     pipeline = _run_pipeline(files, ctx)
