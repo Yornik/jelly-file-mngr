@@ -736,7 +736,22 @@ def _finalize_after_lookup(
     if ctx.interactive and progress is not None:
         progress.start()
 
-    # Non-interactive ambiguous → skip
+    # No-match path → ask Haiku for a second-chance aside classification.
+    # Pattern-based classify_aside (phase 1) already missed it, and TMDB came up
+    # empty / ambiguous. Haiku can read the parent-dir + filename together and
+    # recognise foreign-language extras dirs (Bonusy/, Doplnki/, …), ad-hoc
+    # names, or extras that don't fit the parent-dir-name regex catalogue.
+    if match is None:
+        ai_kind = _try_ai_aside_classification(file, ctx)
+        if ai_kind is not None and ai_kind != AsideKind.DISCARD:
+            ctx.logger.info(
+                "classify_aside_via_ai",
+                file=file,
+                aside_kind=ai_kind.value,
+            )
+            return FileResult(kind="aside", aside_kind=ai_kind)
+
+    # Non-interactive ambiguous → skip (after AI had its shot above)
     if not match and not ctx.interactive and lookup.matches:
         if not ctx.quiet:
             console.print(
@@ -792,20 +807,7 @@ def _finalize_after_lookup(
         )
         return FileResult(kind="planned", move=move)
 
-    # No TMDB match. Last-chance: ask Haiku whether this is bonus content.
-    # Pattern-based classify_aside (in phase 1) already missed it, but Haiku
-    # can read the parent dir + filename together and recognise foreign-language
-    # extras dirs ("Bonusy/", "Doplnki/", …) or content that's just oddly named.
     if move.skipped:
-        ai_kind = _try_ai_aside_classification(file, ctx)
-        if ai_kind is not None and ai_kind != AsideKind.DISCARD:
-            # AI says it's a real extras kind. Skip gets converted to aside routing.
-            ctx.logger.info(
-                "classify_aside_via_ai",
-                file=file,
-                aside_kind=ai_kind.value,
-            )
-            return FileResult(kind="aside", aside_kind=ai_kind)
         ctx.logger.warning(
             "match_skipped",
             file=file,
@@ -1090,6 +1092,12 @@ def _run_pipeline_parallel(files: list[Path], ctx: OrganizeContext) -> PipelineR
                 err_console.print("[bold red]Stopping.[/bold red]")
                 out.aborted = True
                 break
+            if result.kind == "aside":
+                # AI's second-chance classification reclassified a TMDB-miss as bonus
+                # content. Add to the aside list so it routes via _plan_aside_routing.
+                assert result.aside_kind is not None
+                out.aside_files.append((cf.file, result.aside_kind))
+                continue
             if result.kind == "planned" and result.move is not None:
                 out.planned_moves.append(result.move)
 
