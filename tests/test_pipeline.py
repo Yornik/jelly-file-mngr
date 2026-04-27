@@ -1733,6 +1733,75 @@ def test_run_pipeline_parallel_no_lookup_files_skips_phase_2(tmp_path: Path):
     assert result.junk_files == [junk]
 
 
+def test_active_counter_thread_safe():
+    """The counter is shared across worker threads — must be lock-protected."""
+    import threading
+
+    from jellyfiler.cli import _ActiveCounter
+
+    counter = _ActiveCounter()
+    threads = []
+
+    def burst():
+        for _ in range(100):
+            counter.inc()
+            counter.dec()
+
+    for _ in range(10):
+        t = threading.Thread(target=burst)
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert counter.get() == 0
+
+
+def test_active_workers_column_renders_live_count():
+    """The custom progress column reads the counter on each render call."""
+    from jellyfiler.cli import _ActiveCounter, _ActiveWorkersColumn
+
+    counter = _ActiveCounter()
+    counter.inc()
+    counter.inc()
+    column = _ActiveWorkersColumn(counter, max_workers=8)
+    rendered = column.render(MagicMock())
+    assert "2/8" in str(rendered)
+
+
+def test_tracked_lookup_increments_and_decrements_counter(tmp_path: Path):
+    """The wrapper bumps the counter while inside the lookup chain."""
+    from jellyfiler.cli import _ActiveCounter, _tracked_lookup
+
+    ctx = _ctx(tmp_path)
+    counter = _ActiveCounter()
+    seen_count = []
+
+    def fake_lookup(*args, **kwargs):
+        seen_count.append(counter.get())  # snapshot count while inside
+        return LookupResult(matches=[], search_title="", status="ok")
+
+    with patch("jellyfiler.cli._lookup_match_chain", side_effect=fake_lookup):
+        _tracked_lookup(counter, _episode(), tmp_path / "x.mkv", ctx)
+
+    assert seen_count == [1]  # counter was 1 while inside the wrapper
+    assert counter.get() == 0  # decremented on exit
+
+
+def test_tracked_lookup_decrements_on_exception(tmp_path: Path):
+    """If the inner lookup raises, the counter must still decrement."""
+    from jellyfiler.cli import _ActiveCounter, _tracked_lookup
+
+    ctx = _ctx(tmp_path)
+    counter = _ActiveCounter()
+    with (
+        patch("jellyfiler.cli._lookup_match_chain", side_effect=RuntimeError("boom")),
+        pytest.raises(RuntimeError),
+    ):
+        _tracked_lookup(counter, _episode(), tmp_path / "x.mkv", ctx)
+    assert counter.get() == 0
+
+
 def test_lookup_chain_skips_ai_prompt_in_parallel_mode(tmp_path: Path):
     """In parallel mode, AI errors must abort instead of prompting (no shared stdin)."""
     from jellyfiler.ai_query import AiQueryError

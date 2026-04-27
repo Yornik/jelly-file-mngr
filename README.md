@@ -52,19 +52,20 @@ Quality ranking: filename resolution tag (2160p > 1080p > 720p > 480p) is the pr
 ### TMDB rate limiting
 The TMDB client throttles outbound requests to **40 RPS** by default — comfortably below TMDB's documented 50 RPS cap on free API keys, with a buffer for clock drift and burstiness. If TMDB returns `429 Too Many Requests`, the client honours the `Retry-After` header and retries once. Configurable via `TmdbClient(rps=...)` if you have a paid plan with higher limits; set `rps=0` to disable.
 
-### Parallel TMDB lookups (`--parallel N`, default 12)
-Each TMDB call spends most of its time waiting on the network. By default jellyfiler fans lookups out across **12 worker threads** — comfortably under TMDB's 50 RPS cap and a good fit for any modern machine. Pass `-j 1` to force the old sequential behaviour, or `-j 16` to push closer to the rate limit on a fast connection.
+### Parallel TMDB lookups (`--parallel N`, default 40)
+Each TMDB call spends most of its time waiting on the network. By default jellyfiler fans lookups out across **40 worker threads** — enough to fully saturate TMDB's 50 RPS cap even on slow-API days. Workers share the global rate limiter, so going higher costs only a few KB of stack per thread; the actual outbound rate is always capped. Pass `-j 1` to force sequential mode for debugging.
 
 ```bash
-uv run jellyfiler organize /source /dest --apply              # 12 workers (default)
-uv run jellyfiler organize /source /dest -j 1 --apply         # sequential
-uv run jellyfiler organize /source /dest -j 16 --apply        # push closer to RPS cap
+uv run jellyfiler organize /source /dest --apply              # 40 workers (default)
+uv run jellyfiler organize /source /dest -j 1 --apply         # sequential (debug)
 ```
 
 Three-phase pipeline:
 1. **Classify** — sequential, fast: cache check, junk filter, guessit parse, pinned-cache lookup. Interactive "missing title" prompt fires here if needed.
 2. **Lookup** — parallel: TMDB → variant retries → AniList → AI fallback chain runs across N threads. The rate limiter is a global token bucket so all workers share the budget.
 3. **Finalize** — sequential, on the main thread: ambiguous-match prompt, bare-episode prompt, plan + pin.
+
+The progress bar gains a live `⚙ <active>/<max>` column during phase 2 so you can see whether the pool is saturated (active = max) or starving (active << max, usually means TMDB is responding fast and the rate limiter is the bottleneck — exactly what we want).
 
 Output ordering is preserved — phase 3 walks classifications in input order, even though phase 2 completes futures out of order. The AI-disable interactive prompt is suppressed in parallel mode (worker threads can't share stdin); AI errors abort the run instead.
 
@@ -187,7 +188,7 @@ uv run jellyfiler organize /source /dest --rich-names --apply
 uv run jellyfiler dedupe /source /dest --quarantine-duplicates --apply
 uv run jellyfiler dedupe /source /dest --remove-duplicates --i-mean-it --apply
 
-# Force sequential TMDB lookups (default is 12 parallel workers, throttled to 40 RPS)
+# Force sequential TMDB lookups (default is 40 parallel workers, throttled to 40 RPS)
 uv run jellyfiler organize /source /dest -j 1 --apply
 
 # Enable Claude Haiku AI fallback for titles that defeat all other parsing

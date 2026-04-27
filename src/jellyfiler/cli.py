@@ -17,6 +17,7 @@ the post-execute cleanup (:func:`_apply_dedupe_actions`).
 import os
 import re
 import shutil
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any
@@ -25,7 +26,16 @@ import httpx
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    ProgressColumn,
+    SpinnerColumn,
+    Task,
+    TextColumn,
+)
+from rich.text import Text
 
 from jellyfiler.ai_query import AiQueryError, preflight_check, suggest_search
 from jellyfiler.anilist import looks_like_anime, search_anime
@@ -793,6 +803,59 @@ def _run_pipeline(files: list[Path], ctx: OrganizeContext) -> PipelineResult:
     return out
 
 
+class _ActiveCounter:
+    """Thread-safe live count of workers currently inside the lookup chain.
+
+    Used by :class:`_ActiveWorkersColumn` to render a live "⚙ N/M" indicator
+    in the progress bar so the operator can see whether the parallel pool
+    is saturated or idling.
+    """
+
+    __slots__ = ("_n", "_lock")
+
+    def __init__(self) -> None:
+        self._n = 0
+        self._lock = threading.Lock()
+
+    def inc(self) -> None:
+        with self._lock:
+            self._n += 1
+
+    def dec(self) -> None:
+        with self._lock:
+            self._n -= 1
+
+    def get(self) -> int:
+        with self._lock:
+            return self._n
+
+
+class _ActiveWorkersColumn(ProgressColumn):
+    """Renders ⚙ <active>/<max> in the progress bar — refreshes ~10x/sec."""
+
+    def __init__(self, counter: _ActiveCounter, max_workers: int) -> None:
+        super().__init__()
+        self._counter = counter
+        self._max = max_workers
+
+    def render(self, task: Task) -> Text:
+        return Text(f"⚙ {self._counter.get()}/{self._max}", style="cyan")
+
+
+def _tracked_lookup(
+    counter: _ActiveCounter,
+    guessed: GuessedMedia,
+    file: Path,
+    ctx: OrganizeContext,
+) -> LookupResult:
+    """Wrap ``_lookup_match_chain`` so we can count threads in flight."""
+    counter.inc()
+    try:
+        return _lookup_match_chain(guessed, file, ctx, progress=None)
+    finally:
+        counter.dec()
+
+
 def _run_pipeline_parallel(files: list[Path], ctx: OrganizeContext) -> PipelineResult:
     """Three-phase pipeline that parallelises the TMDB lookup phase.
 
@@ -803,6 +866,9 @@ def _run_pipeline_parallel(files: list[Path], ctx: OrganizeContext) -> PipelineR
 
     Output ordering is preserved by walking ``classifications`` in input order
     in phase 3 — even though phase 2 completes futures out of order.
+
+    Phase 2 shows a live ⚙ <active>/<max> worker count in the progress bar
+    so you can see whether the rate limiter is saturating the pool.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -830,31 +896,40 @@ def _run_pipeline_parallel(files: list[Path], ctx: OrganizeContext) -> PipelineR
         lookup_results: dict[Path, LookupResult] = {}
 
         if needs_lookup:
-            lookup_task = progress.add_task(
-                f"TMDB lookups (×{ctx.parallel} parallel)...", total=len(needs_lookup)
-            )
             workers = max(1, ctx.parallel)
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tmdb") as ex:
-                # Submit all and collect by ClassifiedFile. Filter out the
-                # impossible "needs_lookup with no guessed" case for the type checker.
-                future_to_cf: dict[Any, ClassifiedFile] = {}
-                for cf in needs_lookup:
-                    assert cf.guessed is not None  # invariant of needs_lookup
-                    future_to_cf[ex.submit(_lookup_match_chain, cf.guessed, cf.file, ctx, None)] = (
-                        cf
-                    )
-                from concurrent.futures import as_completed
+            active = _ActiveCounter()
+            # Splice a live "⚙ N/M workers" column into the existing progress
+            # bar for the duration of phase 2. Rich refreshes ~10×/sec so the
+            # count updates in real time as workers enter/leave the lookup chain.
+            workers_col = _ActiveWorkersColumn(active, workers)
+            progress.columns = (*progress.columns, workers_col)
+            lookup_task = progress.add_task(
+                f"TMDB lookups (×{workers} workers)...", total=len(needs_lookup)
+            )
+            try:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tmdb") as ex:
+                    future_to_cf: dict[Any, ClassifiedFile] = {}
+                    for cf in needs_lookup:
+                        assert cf.guessed is not None  # invariant of needs_lookup
+                        future_to_cf[
+                            ex.submit(_tracked_lookup, active, cf.guessed, cf.file, ctx)
+                        ] = cf
+                    from concurrent.futures import as_completed
 
-                for fut in as_completed(future_to_cf):
-                    cf = future_to_cf[fut]
-                    try:
-                        lookup_results[cf.file] = fut.result()
-                    except Exception as exc:
-                        # A worker raised — record as tmdb_error so phase 3 aborts cleanly.
-                        lookup_results[cf.file] = LookupResult(
-                            status="tmdb_error", error_msg=str(exc)
-                        )
-                    progress.advance(lookup_task)
+                    for fut in as_completed(future_to_cf):
+                        cf = future_to_cf[fut]
+                        try:
+                            lookup_results[cf.file] = fut.result()
+                        except Exception as exc:
+                            # A worker raised — record as tmdb_error so phase 3 aborts cleanly.
+                            lookup_results[cf.file] = LookupResult(
+                                status="tmdb_error", error_msg=str(exc)
+                            )
+                        progress.advance(lookup_task)
+            finally:
+                # Drop the worker column when phase 2 ends so phase 3's bar
+                # doesn't show a stale "0/N" indicator.
+                progress.columns = tuple(c for c in progress.columns if c is not workers_col)
 
         # ── Phase 3: finalize in original order ────────────────────────────
         finalize_task = progress.add_task("Finalizing matches...", total=len(classifications))
@@ -1123,12 +1198,13 @@ def organize(
             "--parallel",
             "-j",
             help=(
-                "Number of parallel TMDB lookup workers. Default 12 — comfortably "
-                "under TMDB's 50 RPS cap and a good fit for any modern machine. "
-                "Pass 1 to force sequential mode."
+                "Number of parallel TMDB lookup workers. Default 40 — fully "
+                "saturates TMDB's 50 RPS cap even on slow-API days. Workers "
+                "share the global rate limiter, so going higher costs only a "
+                "few KB of stack per thread. Pass 1 to force sequential mode."
             ),
         ),
-    ] = 12,
+    ] = 40,
 ) -> None:
     """Scan SOURCE, match against TMDB, and organize into DEST.
 
@@ -1291,11 +1367,11 @@ def dedupe(
             "--parallel",
             "-j",
             help=(
-                "Number of parallel TMDB lookup workers. Default 12 — comfortably "
-                "under TMDB's 50 RPS cap. Pass 1 to force sequential mode."
+                "Number of parallel TMDB lookup workers. Default 40 — saturates "
+                "TMDB's rate cap even on slow-API days. Pass 1 to force sequential."
             ),
         ),
-    ] = 12,
+    ] = 40,
 ) -> None:
     """Find and resolve duplicate-destination files in SOURCE.
 
