@@ -102,14 +102,37 @@ Battle-tested against ~350 real release names from a messy SMB library. The pars
 - **Year-range season folders**: `Season 1 (1994-95)` doesn't leak `year=1994` into the search
 - **Anime intro/outro tracks**: `NCOP`, `NCED`, `Creditless_OP1`, `Non-Credit Ending` → quarantined as junk (never canonical episodes), but episode titles like "Endings Are Always..." or "Operation Ruthless" are NOT misclassified.
 
-### Claude Haiku AI search fallback
-When TMDB title-variant retries **and** the AniList anime fallback both miss, pass `--use-ai` to send the raw release directory and filename to `claude-haiku-4-5` for a clean search query. Requires `ANTHROPIC_API_KEY` — the flag is always opt-in so tokens are never spent without explicit intent. AniList runs first, so anime titles only reach the paid AI fallback when AniList itself can't find them.
+### Claude Haiku AI fallbacks (`--use-ai`)
+A single opt-in flag drives **two** Haiku-backed fallbacks. Both fire only when the cheap pattern/regex/TMDB chain has already exhausted itself, both cache aggressively, and both swallow network errors so a transient failure doesn't abort the run.
 
-Before scanning any files, `--use-ai` runs a preflight check: it verifies the key is set and that Haiku responds correctly. If either fails, the run aborts immediately with a clear error.
+**1. TMDB search query suggestion** — when TMDB title-variant retries **and** the AniList anime fallback both miss, the raw release directory + filename go to Haiku for a clean search query. AniList runs first, so anime titles only reach the paid AI fallback when AniList itself can't find them.
 
-API errors during a run (bad key, quota, network) stop the run in `--no-interactive` mode. In interactive mode you are prompted to disable AI and continue without it.
+**2. Aside (extras) classification** — when pattern-based `classify_aside` misses an unfamiliar parent dir name (`Bonusy/` Polish, `Doplnki/` Czech, ad-hoc `Bonus-Materials/`, etc.) **and** TMDB can't match it as main media, Haiku reads parent-dir + filename together and picks one of the Jellyfin extras kinds (`FEATURETTES`, `DELETED_SCENES`, `INTERVIEWS`, …) or returns `MAIN_MEDIA` to fall through to the normal skip. Cached per `(parent_dir, filename)`, so a release group's quirky naming pattern is classified once and free thereafter.
 
-The prompt is a single system instruction + the two raw strings, keeping token usage minimal across large libraries.
+Concrete example:
+
+```
+source/Avatar (2009)/
+  Avatar.2009.1080p.mkv
+  Bonusy/                         ← unrecognised dir name
+    making-of-pandora.mkv
+    director-interview.mkv
+```
+
+After `organize --use-ai --apply`:
+
+```
+dest/Avatar (2009)/
+  Avatar (2009).mkv
+  featurettes/making-of-pandora.mkv  ← Haiku → FEATURETTES
+  interviews/director-interview.mkv  ← Haiku → INTERVIEWS
+```
+
+**Operational notes:**
+- Requires `ANTHROPIC_API_KEY`; the flag is always opt-in so tokens are never spent without explicit intent.
+- Runs a preflight check at startup — if the key is invalid, the run aborts before any file work.
+- API errors mid-run (bad key, quota, network) stop the run in `--no-interactive` mode. In interactive (sequential) mode you're prompted to disable AI and continue.
+- Each call is a single system instruction + two raw strings; token usage stays minimal even on multi-thousand-file libraries.
 
 ---
 
@@ -144,7 +167,9 @@ output/
 **Smart routing of non-canonical content (extras, samples, sidecars):**
 
 * **Jellyfin-recognised extras** — files inside `Featurettes/`, `Behind the Scenes/`, `Deleted Scenes/`, `Interviews/`, `Trailers/`, `Shorts/`, `Bloopers/`, `DVD Extras/`, `Bonus Features/`, `Specials/` or generic `Extras/` are routed into the matching subdirectory of the parent media item (`<Movie> (Year)/featurettes/...`, `<Show>/behind the scenes/...`). Jellyfin then displays them as bonus content alongside the main title.
-* **DISCARD content** — samples, NCOP/NCED tracks, hash-named files, RARBG promo videos, and `.nfo`/`.txt`/`.jpg`/etc. sidecars go to `dest/.aside/` by default (recoverable). Pass `--remove-discards --i-mean-it` to **PERMANENTLY DELETE** them instead. Without `--i-mean-it` the run aborts with a big red warning.
+* **Anime OP/ED** — non-credit opening/ending tracks (`NCOP`, `NCED`, `Creditless_OP1`, files in `OP/`/`ED/`/`Openings/`/`Endings/` folders) preserve to `<Show>/extras/op-ed/`.
+* **AI fallback for unknown dir names** (`--use-ai`) — pattern-based classification can't enumerate every dir variant (`Bonusy/`, `Doplnki/`, `Bonus-Materials/`, ad-hoc names). When patterns miss AND TMDB can't match as main media, Haiku reads parent-dir + filename together and picks a kind. See the dedicated [Claude Haiku AI fallbacks](#claude-haiku-ai-fallbacks---use-ai) section below for details.
+* **DISCARD content** — samples, hash-named files, RARBG promo videos, and `.nfo`/`.txt`/`.jpg`/etc. sidecars go to `dest/.aside/` by default (recoverable). Pass `--remove-discards --i-mean-it` to **PERMANENTLY DELETE** them instead. Without `--i-mean-it` the run aborts with a big red warning.
 * **Orphan extras** (extras folders with no parent movie/show match) fall back to `dest/.aside/`.
 
 The `.aside/` prefix is dot-prefixed so Jellyfin ignores it during scans.

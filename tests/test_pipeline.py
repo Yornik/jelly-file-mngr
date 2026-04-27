@@ -1693,6 +1693,137 @@ def test_finalize_after_lookup_planned_with_match(tmp_path: Path):
     assert out.move is not None
 
 
+def test_try_ai_aside_classification_disabled_when_use_ai_off(tmp_path: Path):
+    from jellyfiler.cli import _try_ai_aside_classification
+
+    ctx = _ctx(tmp_path, use_ai=False)
+    f = tmp_path / "x.mkv"
+    f.touch()
+    assert _try_ai_aside_classification(f, ctx) is None
+
+
+def test_try_ai_aside_classification_disabled_when_ai_disabled(tmp_path: Path):
+    from jellyfiler.cli import _try_ai_aside_classification
+
+    ctx = _ctx(tmp_path, use_ai=True)
+    ctx.ai_disabled = True
+    f = tmp_path / "x.mkv"
+    f.touch()
+    assert _try_ai_aside_classification(f, ctx) is None
+
+
+def test_try_ai_aside_classification_returns_aside_kind(tmp_path: Path):
+    from jellyfiler.aside import AsideKind
+    from jellyfiler.cli import _try_ai_aside_classification
+
+    ctx = _ctx(tmp_path, use_ai=True)
+    parent = tmp_path / "movie-folder"
+    parent.mkdir()
+    f = parent / "making-of.mkv"
+    f.touch()
+    with (
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
+        patch("jellyfiler.cli.suggest_aside_kind", return_value="FEATURETTES"),
+    ):
+        out = _try_ai_aside_classification(f, ctx)
+    assert out == AsideKind.FEATURETTES
+
+
+def test_try_ai_aside_classification_main_media_returns_none(tmp_path: Path):
+    from jellyfiler.cli import _try_ai_aside_classification
+
+    ctx = _ctx(tmp_path, use_ai=True)
+    f = tmp_path / "x.mkv"
+    f.touch()
+    with (
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
+        patch("jellyfiler.cli.suggest_aside_kind", return_value="MAIN_MEDIA"),
+    ):
+        out = _try_ai_aside_classification(f, ctx)
+    assert out is None
+
+
+def test_try_ai_aside_classification_caches_result(tmp_path: Path):
+    """Second call for same (parent, file) doesn't re-hit Haiku."""
+    from jellyfiler.cli import _try_ai_aside_classification
+
+    ctx = _ctx(tmp_path, use_ai=True)
+    parent = tmp_path / "movie-folder"
+    parent.mkdir()
+    f = parent / "interview.mkv"
+    f.touch()
+    with (
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
+        patch("jellyfiler.cli.suggest_aside_kind", return_value="INTERVIEWS") as mock_ai,
+    ):
+        _try_ai_aside_classification(f, ctx)
+        _try_ai_aside_classification(f, ctx)
+        _try_ai_aside_classification(f, ctx)
+    mock_ai.assert_called_once()
+
+
+def test_try_ai_aside_classification_swallows_aiqueryerror(tmp_path: Path):
+    from jellyfiler.ai_query import AiQueryError
+    from jellyfiler.cli import _try_ai_aside_classification
+
+    ctx = _ctx(tmp_path, use_ai=True)
+    f = tmp_path / "x.mkv"
+    f.touch()
+    with (
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
+        patch("jellyfiler.cli.suggest_aside_kind", side_effect=AiQueryError("net")),
+    ):
+        out = _try_ai_aside_classification(f, ctx)
+    assert out is None
+
+
+def test_finalize_after_lookup_uses_ai_to_classify_aside(tmp_path: Path):
+    """TMDB misses + use_ai → Haiku may reclassify as aside instead of skip."""
+    from jellyfiler.aside import AsideKind
+    from jellyfiler.cli import ClassifiedFile, _finalize_after_lookup
+
+    ctx = _ctx(tmp_path, use_ai=True)
+    parent = tmp_path / "movie-folder"
+    parent.mkdir()
+    f = parent / "deleted-1.mkv"
+    f.touch()
+    cf = ClassifiedFile(file=f, kind="needs_lookup", guessed=_episode())
+    with (
+        patch("jellyfiler.cli._resolve_match", return_value=None),
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
+        patch("jellyfiler.cli.suggest_aside_kind", return_value="DELETED_SCENES"),
+    ):
+        result = _finalize_after_lookup(
+            cf,
+            LookupResult(matches=[], search_title="Show", status="ok"),
+            ctx,
+        )
+    assert result.kind == "aside"
+    assert result.aside_kind == AsideKind.DELETED_SCENES
+
+
+def test_finalize_after_lookup_ai_says_main_media_falls_through_to_skip(tmp_path: Path):
+    from jellyfiler.cli import ClassifiedFile, _finalize_after_lookup
+
+    ctx = _ctx(tmp_path, use_ai=True)
+    f = tmp_path / "weird-name.mkv"
+    f.touch()
+    cf = ClassifiedFile(file=f, kind="needs_lookup", guessed=_episode())
+    with (
+        patch("jellyfiler.cli._resolve_match", return_value=None),
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
+        patch("jellyfiler.cli.suggest_aside_kind", return_value="MAIN_MEDIA"),
+    ):
+        result = _finalize_after_lookup(
+            cf,
+            LookupResult(matches=[], search_title="Show", status="ok"),
+            ctx,
+        )
+    assert result.kind == "planned"
+    assert result.move is not None
+    assert result.move.skipped
+
+
 def test_run_pipeline_parallel_same_results_as_sequential(tmp_path: Path):
     """Parallel pipeline must produce the same plan as sequential, just faster."""
     from jellyfiler.cli import _run_pipeline

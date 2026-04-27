@@ -389,6 +389,105 @@ def test_preflight_check_true_when_response_is_true():
         assert preflight_check("fake-key") is True
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# suggest_aside_kind
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_suggest_aside_kind_returns_recognised_label():
+    """Happy path: Haiku replies with a valid kind label."""
+    from jellyfiler.ai_query import suggest_aside_kind
+
+    mock = _mock_anthropic(json.dumps({"kind": "FEATURETTES"}))
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        out = suggest_aside_kind("Bonus Material", "making-of.mkv", "key")
+    assert out == "FEATURETTES"
+
+
+def test_suggest_aside_kind_normalises_case():
+    """Lowercase / mixed-case responses are accepted, returned upper."""
+    from jellyfiler.ai_query import suggest_aside_kind
+
+    mock = _mock_anthropic(json.dumps({"kind": "deleted_scenes"}))
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        out = suggest_aside_kind("Cut", "scene-22.mkv", "key")
+    assert out == "DELETED_SCENES"
+
+
+def test_suggest_aside_kind_rejects_unknown_label():
+    """Garbage label → None (caller treats as 'no opinion')."""
+    from jellyfiler.ai_query import suggest_aside_kind
+
+    mock = _mock_anthropic(json.dumps({"kind": "WHATEVER"}))
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        assert suggest_aside_kind("X", "y.mkv", "key") is None
+
+
+def test_suggest_aside_kind_handles_bad_json():
+    """Non-JSON or missing 'kind' key → None."""
+    from jellyfiler.ai_query import suggest_aside_kind
+
+    mock = _mock_anthropic("not json at all")
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        assert suggest_aside_kind("X", "y.mkv", "key") is None
+
+
+def test_suggest_aside_kind_strips_markdown_fences():
+    from jellyfiler.ai_query import suggest_aside_kind
+
+    wrapped = f"```json\n{json.dumps({'kind': 'TRAILERS'})}\n```"
+    mock = _mock_anthropic(wrapped)
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        assert suggest_aside_kind("X", "y.mkv", "key") == "TRAILERS"
+
+
+def test_suggest_aside_kind_returns_main_media_when_haiku_thinks_so():
+    """MAIN_MEDIA is a valid label — caller treats it as 'not an aside, fall through'."""
+    from jellyfiler.ai_query import suggest_aside_kind
+
+    mock = _mock_anthropic(json.dumps({"kind": "MAIN_MEDIA"}))
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        assert suggest_aside_kind("X", "y.mkv", "key") == "MAIN_MEDIA"
+
+
+def test_suggest_aside_kind_anthropic_unavailable_returns_none():
+    from jellyfiler.ai_query import suggest_aside_kind
+
+    with patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", False):
+        assert suggest_aside_kind("X", "y.mkv", "key") is None
+
+
+def test_suggest_aside_kind_raises_aiqueryerror_on_api_failure():
+    from jellyfiler.ai_query import AiQueryError, suggest_aside_kind
+
+    mock = MagicMock()
+    mock.Anthropic.return_value.messages.create.side_effect = RuntimeError("net down")
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+        pytest.raises(AiQueryError),
+    ):
+        suggest_aside_kind("X", "y.mkv", "key")
+
+
 def test_suggest_search_handles_non_text_block():
     """Line 82: model returns a non-TextBlock content block → None."""
     msg = MagicMock()
