@@ -11,7 +11,7 @@ Resolution modes:
       - skip both (move neither)
       - "always keep highest quality" sticky for run, losers stay in source
       - "always keep highest quality + quarantine losers" sticky, losers
-        moved to ``dest/.junk/duplicates/`` (recoverable)
+        moved to ``dest/.aside/duplicates/`` (recoverable)
   * **--remove-duplicates --i-mean-it** — auto-pick the higher-quality file
     and **PERMANENTLY DELETE** the losers (the only path in the codebase
     that deletes files; protected by the double-flag safety in cli.py).
@@ -114,7 +114,7 @@ class DuplicateChoice:
     KEEP_INDEX = "keep_index"  # keep group[index], skip others (others stay in source)
     SKIP_ALL = "skip_all"  # don't move any of them
     ALWAYS_HIGHER = "always_higher"  # sticky: highest quality, losers stay in source
-    ALWAYS_QUARANTINE = "always_quarantine"  # sticky: highest quality + losers → .junk/duplicates/
+    ALWAYS_QUARANTINE = "always_quarantine"  # sticky: highest quality + losers → .aside/duplicates/
     DELETE_LOSERS = (
         "delete_losers"  # ONE-SHOT: keep group[index], delete losers + their parent dirs
     )
@@ -137,7 +137,7 @@ def resolve_duplicates(
       - `losers_to_delete` — files to ``unlink()``. Populated by either
         ``auto_remove=True`` (CLI: --remove-duplicates --i-mean-it) or the
         per-group ``DELETE_LOSERS`` interactive choice.
-      - `losers_to_quarantine` — files to move to ``.junk/duplicates/``.
+      - `losers_to_quarantine` — files to move to ``.aside/duplicates/``.
         Only populated by the interactive ``ALWAYS_QUARANTINE`` sticky.
       - `dirs_to_remove` — set of parent directories to recursively remove
         AFTER the losers in them have been unlinked. Populated only by the
@@ -219,14 +219,14 @@ def resolve_duplicates(
 def quarantine_path(loser: PlannedMove, source_root: Path, dest_root: Path) -> Path:
     """Where a loser file lands when quarantined (not deleted).
 
-    Format: dest_root/.junk/duplicates/<relative-from-source>/filename
-    Keeps duplicate losers visually separate from regular junk inside .junk/.
+    Format: dest_root/.aside/duplicates/<relative-from-source>/filename
+    Keeps duplicate losers visually separate from regular junk inside .aside/.
     """
     try:
         rel = loser.source.relative_to(source_root)
     except ValueError:
         rel = Path(loser.source.name)
-    return dest_root / ".junk" / "duplicates" / rel
+    return dest_root / ".aside" / "duplicates" / rel
 
 
 # Public helper for nice display strings used by both the prompt and tests.

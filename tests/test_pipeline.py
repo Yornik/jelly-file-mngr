@@ -15,8 +15,8 @@ from jellyfiler.cli import (
     LookupResult,
     OrganizeContext,
     _ai_preflight,
+    _apply_aside_actions,
     _apply_dedupe_actions,
-    _handle_junk_files,
     _lookup_match_chain,
     _process_one_file,
     _resolve_dedupe,
@@ -423,7 +423,7 @@ def test_process_one_file_force_bypasses_cache(tmp_path: Path):
     f = tmp_path / "Sample.mkv"  # junk filename
     f.touch()
     out = _process_one_file(f, ctx)
-    assert out.kind == "junk"  # cache check is skipped, junk filter fires
+    assert out.kind == "aside"  # cache check is skipped, junk filter fires
 
 
 def test_process_one_file_junk_returns_junk(tmp_path: Path):
@@ -431,7 +431,7 @@ def test_process_one_file_junk_returns_junk(tmp_path: Path):
     f = tmp_path / "Sample.mkv"
     f.touch()
     out = _process_one_file(f, ctx)
-    assert out.kind == "junk"
+    assert out.kind == "aside"
 
 
 def test_process_one_file_unknown_type_returns_skipped_move(tmp_path: Path):
@@ -638,7 +638,9 @@ def test_run_pipeline_aggregates_planned_and_junk(tmp_path: Path):
     ctx.cache.get_pinned.return_value = _tmdb_match()
     out = _run_pipeline([f1, f2], ctx)
     assert len(out.planned_moves) == 1
-    assert out.junk_files == [f2]
+    from jellyfiler.aside import AsideKind
+
+    assert out.aside_files == [(f2, AsideKind.DISCARD)]
     assert not out.aborted
 
 
@@ -696,9 +698,9 @@ def test_apply_dedupe_actions_quarantines_files(tmp_path: Path):
     loser.touch()
     move = _move_for(loser)
     _apply_dedupe_actions([], [move], set(), src, dst)
-    # File moved to .junk/duplicates/
+    # File moved to .aside/duplicates/
     assert not loser.exists()
-    quarantined = dst / ".junk" / "duplicates" / "show.720p.mkv"
+    quarantined = dst / ".aside" / "duplicates" / "show.720p.mkv"
     assert quarantined.exists()
 
 
@@ -710,7 +712,7 @@ def test_apply_dedupe_actions_skips_when_quarantine_target_exists(tmp_path: Path
     loser = src / "show.720p.mkv"
     loser.touch()
     # Pre-create quarantine target
-    qdir = dst / ".junk" / "duplicates"
+    qdir = dst / ".aside" / "duplicates"
     qdir.mkdir(parents=True)
     (qdir / "show.720p.mkv").write_text("existing")
     move = _move_for(loser)
@@ -906,33 +908,97 @@ def test_resolve_dedupe_non_interactive_no_flags_skips_both(tmp_path: Path):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# _handle_junk_files
+# _apply_aside_actions
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_handle_junk_files_dry_run_does_not_move(tmp_path: Path):
+def test_apply_aside_actions_dry_run_does_not_move(tmp_path: Path):
+    from jellyfiler.aside import AsideKind
+    from jellyfiler.cli import AsideAction
+    from jellyfiler.jsonlog import NullLogger
+
     src = tmp_path / "src"
     src.mkdir()
     f = src / "Sample.mkv"
     f.write_bytes(b"x" * 100)
-    bytes_ = _handle_junk_files([f], src, tmp_path / "dst", dry_run=True)
+    actions = [
+        AsideAction(
+            source=f,
+            kind=AsideKind.DISCARD,
+            action="aside_pile",
+            destination=tmp_path / "dst" / ".aside" / "Sample.mkv",
+        )
+    ]
+    bytes_ = _apply_aside_actions(actions, dry_run=True, logger=NullLogger())
     assert bytes_ == 100
     assert f.exists()  # not moved
 
 
-def test_handle_junk_files_live_moves_files(tmp_path: Path):
+def test_apply_aside_actions_live_moves_to_aside_pile(tmp_path: Path):
+    from jellyfiler.aside import AsideKind
+    from jellyfiler.cli import AsideAction
+    from jellyfiler.jsonlog import NullLogger
+
     src = tmp_path / "src"
     dst = tmp_path / "dst"
     src.mkdir()
     f = src / "Sample.mkv"
     f.touch()
-    _handle_junk_files([f], src, dst, dry_run=False)
+    actions = [
+        AsideAction(
+            source=f,
+            kind=AsideKind.DISCARD,
+            action="aside_pile",
+            destination=dst / ".aside" / "Sample.mkv",
+        )
+    ]
+    _apply_aside_actions(actions, dry_run=False, logger=NullLogger())
     assert not f.exists()
-    assert (dst / ".junk" / "Sample.mkv").exists()
+    assert (dst / ".aside" / "Sample.mkv").exists()
 
 
-def test_handle_junk_files_empty_list_returns_zero(tmp_path: Path):
-    assert _handle_junk_files([], tmp_path, tmp_path / "dst", dry_run=False) == 0
+def test_apply_aside_actions_discard_unlinks_file(tmp_path: Path):
+    from jellyfiler.aside import AsideKind
+    from jellyfiler.cli import AsideAction
+    from jellyfiler.jsonlog import NullLogger
+
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "Sample.mkv"
+    f.touch()
+    actions = [AsideAction(source=f, kind=AsideKind.DISCARD, action="discard")]
+    _apply_aside_actions(actions, dry_run=False, logger=NullLogger())
+    assert not f.exists()
+
+
+def test_apply_aside_actions_jellyfin_extras_routing(tmp_path: Path):
+    """Files routed to a movie's Jellyfin extras subdir end up there."""
+    from jellyfiler.aside import AsideKind
+    from jellyfiler.cli import AsideAction
+    from jellyfiler.jsonlog import NullLogger
+
+    src = tmp_path / "src"
+    src.mkdir()
+    extra = src / "behind-the-scenes.mkv"
+    extra.touch()
+    target = tmp_path / "dst" / "Movie (2009)" / "featurettes" / "behind-the-scenes.mkv"
+    actions = [
+        AsideAction(
+            source=extra,
+            kind=AsideKind.FEATURETTES,
+            action="jellyfin_extras",
+            destination=target,
+        )
+    ]
+    _apply_aside_actions(actions, dry_run=False, logger=NullLogger())
+    assert not extra.exists()
+    assert target.exists()
+
+
+def test_apply_aside_actions_empty_list_returns_zero(tmp_path: Path):
+    from jellyfiler.jsonlog import NullLogger
+
+    assert _apply_aside_actions([], dry_run=False, logger=NullLogger()) == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1329,7 +1395,7 @@ def test_process_one_file_quiet_false_junk(tmp_path: Path):
     f = tmp_path / "Sample.mkv"
     f.touch()
     out = _process_one_file(f, ctx)
-    assert out.kind == "junk"
+    assert out.kind == "aside"
 
 
 def test_process_one_file_quiet_false_unknown_type(tmp_path: Path):
@@ -1517,7 +1583,7 @@ def test_classify_file_junk(tmp_path: Path):
     f = tmp_path / "Sample.mkv"
     f.touch()
     cf = _classify_file(f, ctx)
-    assert cf.kind == "junk"
+    assert cf.kind == "aside"
 
 
 def test_classify_file_unknown_type_returns_skipped(tmp_path: Path):
@@ -1730,7 +1796,9 @@ def test_run_pipeline_parallel_no_lookup_files_skips_phase_2(tmp_path: Path):
     with patch("jellyfiler.cli._lookup_match_chain") as mock_lookup:
         result = _run_pipeline([junk, cached], ctx)
     mock_lookup.assert_not_called()
-    assert result.junk_files == [junk]
+    from jellyfiler.aside import AsideKind
+
+    assert result.aside_files == [(junk, AsideKind.DISCARD)]
 
 
 def test_active_counter_thread_safe():
