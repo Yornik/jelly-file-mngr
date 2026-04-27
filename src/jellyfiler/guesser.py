@@ -21,6 +21,49 @@ _SEGMENT_LETTER = re.compile(r"(?i)(S\d+E\d+)([a-c])(?=\b|[\s._-])")
 # Examples: "Season 1 (1994-95)", "AVATAR (2005-2014)", "Book 3 - Fire (2007-08)".
 # When a parent-dir name has one of these, we suppress year fallback from that dir.
 _YEAR_RANGE = re.compile(r"\(\s*\d{4}\s*[-–]\s*\d{2,4}\s*\)")
+# Real episode markers — when present, guessit's season+episode came from a real
+# marker (S01E01, Episode 5, E12), not a 4-digit-year false split. Used to
+# guard against `_fix_year_split` undoing legitimate parses.
+_REAL_SE_MARKER = re.compile(r"(?i)(S\d+\s*E\d+|Episode\s*\d+|\bE\d{2,}\b)")
+
+
+def _fix_year_split(result: dict[str, object], name: str) -> dict[str, object]:
+    """Undo guessit's false split of a 4-digit year into season+episode.
+
+    Without explicit ``SxxExx`` markers, guessit treats trailing year-like
+    numbers as season/episode (``Blade.Runner.2049.mkv`` → S20E49,
+    ``1917.mkv`` → S19E17). When the concatenation of season+episode is a
+    plausible year (1900–2099) AND the filename has no real S/E marker,
+    drop the split and recover the year.
+    """
+    season = result.get("season")
+    episode = result.get("episode")
+    if isinstance(season, list):
+        season = season[0] if season else None
+    if isinstance(episode, list):
+        episode = episode[0] if episode else None
+    if season is None or episode is None:
+        return result
+    if not isinstance(season, (int, float, str)) or not isinstance(episode, (int, float, str)):
+        return result
+    try:
+        s_int = int(season)
+        e_int = int(episode)
+    except (TypeError, ValueError):
+        return result
+    candidate = int(f"{s_int:02d}{e_int:02d}")
+    if not (1900 <= candidate <= 2099):
+        return result
+    if _REAL_SE_MARKER.search(name):
+        return result
+    fixed = dict(result)
+    fixed.pop("season", None)
+    fixed.pop("episode", None)
+    if "year" not in fixed:
+        fixed["year"] = candidate
+    if fixed.get("type") == "episode":
+        fixed["type"] = "movie"
+    return fixed
 
 
 def _clean_title(title: str) -> str:
@@ -125,8 +168,23 @@ def guess(path: Path) -> GuessedMedia:
     """
     # Pre-process: split-episode letter markers (S01E01a/b) confuse guessit.
     preprocessed_name, segment = _strip_segment_letter(path.name)
-    file_result = _parse_name(preprocessed_name)
+    raw_file_result = _parse_name(preprocessed_name)
+    file_result = _fix_year_split(raw_file_result, preprocessed_name)
+    file_was_false_split = file_result is not raw_file_result
     media_type, title, year, season, episode, episode_end = _extract(file_result)
+
+    # When the filename basename is JUST a year (``1986.mkv``, ``1917.mkv``,
+    # ``2049.mkv``), the number is the TITLE, not the release year — the
+    # movie titled "1986" actually came out in 2018, "1917" in 2019, etc.
+    # Use the year as the title and drop the year so TMDB or the parent dir
+    # supplies the real release year.
+    if year and not title:
+        stem = path.stem
+        if stem == str(year):
+            title = str(year)
+            year = None
+            if media_type == MediaType.UNKNOWN:
+                media_type = MediaType.MOVIE
 
     dir_result: dict[str, object] = {}
 
@@ -134,7 +192,7 @@ def guess(path: Path) -> GuessedMedia:
     # show title / season / year there even when individual filenames are bare.
     parent_name = path.parent.name
     if parent_name and parent_name not in {".", ""}:
-        dir_result = _parse_name(parent_name)
+        dir_result = _fix_year_split(_parse_name(parent_name), parent_name)
         _, dir_title, dir_year, dir_season, _, _ = _extract(dir_result)
 
         # Year ranges in parent names ("Season 1 (1994-95)") give a season-aired
@@ -146,6 +204,16 @@ def guess(path: Path) -> GuessedMedia:
             title = dir_title
         if not year and dir_year:
             year = dir_year
+        # When the file's S/E was a falsely-split year, the file's title is
+        # usually missing the year-suffix (file: "Blade Runner" vs parent:
+        # "Blade Runner 2049"), and the file's year is the in-title number
+        # rather than the real release year. Prefer parent's title/year when
+        # the parent identifies as a movie with a year of its own.
+        if file_was_false_split and dir_result.get("type") == "movie":
+            if dir_title and len(dir_title) > len(title):
+                title = dir_title
+            if dir_year:
+                year = dir_year
         # Use `is None` so an explicit season=0 (S00E01) isn't replaced.
         if season is None and dir_season is not None:
             season = dir_season
