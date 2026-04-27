@@ -183,6 +183,48 @@ def test_movie_coco_year_only():
     assert g.year == 2017
 
 
+def test_movie_dash_separated_subtitle_kept():
+    """The Punisher - War Zone (2008) — guessit splits into title+alternative_title.
+    Without combining them, TMDB search for 'The Punisher' year=2008 falls to any-year
+    exact match and picks the wrong 2004 / 1989 movie. We combine as 'Title: Subtitle'
+    so TMDB finds the canonical 'Punisher: War Zone' (2008)."""
+    g = guess(
+        Path("The PUNISHER - Complete Movie Trilogy - 720p BrRip x264")
+        / "03. The Punisher - War Zone (2008) - 720p BrRip"
+        / "The Punisher - War Zone (2008 - 720p).mp4"
+    )
+    assert g.media_type == MediaType.MOVIE
+    assert g.title == "The Punisher: War Zone"
+    assert g.year == 2008
+
+
+def test_movie_dash_subtitle_avengers_endgame():
+    """Avengers - Endgame (2019) — generic dash-subtitle pattern, not specific to Punisher."""
+    g = guess(Path("Avengers - Endgame (2019) 1080p.mkv"))
+    assert g.media_type == MediaType.MOVIE
+    assert g.title == "Avengers: Endgame"
+    assert g.year == 2019
+
+
+def test_punisher_first_two_movies_unaffected():
+    """The Punisher (1989) and (2004) have no subtitle — must remain just 'The Punisher'."""
+    g_1989 = guess(
+        Path("The PUNISHER - Complete Movie Trilogy - 720p BrRip x264")
+        / "01. The Punisher (1989) - 720p BrRip"
+        / "The Punisher (1989 - 720p).mp4"
+    )
+    assert g_1989.title == "The Punisher"
+    assert g_1989.year == 1989
+
+    g_2004 = guess(
+        Path("The PUNISHER - Complete Movie Trilogy - 720p BrRip x264")
+        / "02. The Punisher (2004) - 720p BrRip"
+        / "The Punisher (2004 - 720p).mp4"
+    )
+    assert g_2004.title == "The Punisher"
+    assert g_2004.year == 2004
+
+
 # ---------------------------------------------------------------------------
 # OVAs — routed to Season 00 (Jellyfin's Specials) so they don't collide
 # with main-series numbering. Real filenames sampled from the SMB library.

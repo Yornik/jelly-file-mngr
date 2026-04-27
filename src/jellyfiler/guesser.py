@@ -64,6 +64,18 @@ def _extract(
     title = result.get("title", "")
     if isinstance(title, list):
         title = title[0]
+
+    # Dash-separated movie subtitles ("The Punisher - War Zone") get split by
+    # guessit into title + alternative_title. Combine them as "Title: Subtitle"
+    # so TMDB search finds the full canonical name (e.g. "Punisher: War Zone").
+    # TV folder names also produce alternative_title in guessit but it's usually
+    # numbered-prefix noise like "08 Series - The Last Airbender", so skip there.
+    alt_title = result.get("alternative_title", "")
+    if isinstance(alt_title, list):
+        alt_title = alt_title[0] if alt_title else ""
+    if title and alt_title and raw_type == "movie":
+        title = f"{title}: {alt_title}"
+
     title = _clean_title(str(title)) if title else ""
 
     year = result.get("year")
