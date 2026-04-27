@@ -12,6 +12,9 @@ from jellyfiler.models import GuessedMedia, MediaType
 _LEADING_PREFIX = re.compile(r"^[b-df-hj-np-tv-z]\.? (?=[A-Z])")
 # Quality residue guessit sometimes leaves in titles: "ghostbusters 720bd" → "ghostbusters"
 _QUALITY_RESIDUE = re.compile(r"\s+\d{3,4}[bBpP][dD]?\b.*$")
+# Hey-Arnold-style split-episode marker: "S01E01a" / "S01E01b" → strip 'a/b' so guessit parses,
+# capture the letter so the destination filename keeps the two halves distinct.
+_SEGMENT_LETTER = re.compile(r"(?i)(S\d+E\d+)([a-c])(?=\b|[\s._-])")
 
 
 def _clean_title(title: str) -> str:
@@ -69,6 +72,17 @@ def _extract(
     return media_type, title, year, season, episode, episode_end
 
 
+def _strip_segment_letter(name: str) -> tuple[str, str | None]:
+    """Strip a single-letter split-episode marker so guessit can parse SxxExx.
+
+    Returns (stripped_name, letter or None). 'S01E01a Title.mkv' → ('S01E01 Title.mkv', 'a').
+    """
+    m = _SEGMENT_LETTER.search(name)
+    if not m:
+        return name, None
+    return name[: m.start(2)] + name[m.end(2) :], m.group(2).lower()
+
+
 def guess(path: Path) -> GuessedMedia:
     """Parse a filename (and its parent directory name) into structured media metadata.
 
@@ -76,7 +90,9 @@ def guess(path: Path) -> GuessedMedia:
     are filled in from the parent directory name, which often carries the show
     title and season pack info that individual episode files omit.
     """
-    file_result = _parse_name(path.name)
+    # Pre-process: split-episode letter markers (S01E01a/b) confuse guessit.
+    preprocessed_name, segment = _strip_segment_letter(path.name)
+    file_result = _parse_name(preprocessed_name)
     media_type, title, year, season, episode, episode_end = _extract(file_result)
 
     # Fill gaps using the parent directory name — release groups often put the
@@ -111,5 +127,6 @@ def guess(path: Path) -> GuessedMedia:
         episode_title=str(file_result["episode_title"])
         if file_result.get("episode_title")
         else None,
+        segment=segment,
         raw_guess=file_result,
     )
