@@ -1,26 +1,75 @@
-"""CLI entry point."""
+"""CLI entry point.
+
+The two top-level operations are:
+
+  * ``organize`` — scan SOURCE, match files against TMDB, plan moves, execute.
+    Skips duplicates without touching them. Use ``dedupe`` to clean those up.
+  * ``dedupe`` — same scan + match pipeline, but only acts on files that would
+    collide on the same destination. Resolves duplicates per CLI flags
+    (interactive prompt, --quarantine-duplicates, or --remove-duplicates --i-mean-it).
+
+Both share the per-file pipeline via :func:`_process_one_file`. The shared bits
+also include arg validation (:func:`_validate_in_place_args`), the AI preflight
+check, the TMDB-search-with-fallbacks chain (:func:`_lookup_match_chain`), and
+the post-execute cleanup (:func:`_apply_dedupe_actions`).
+"""
 
 import os
 import re
+import shutil
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    ProgressColumn,
+    SpinnerColumn,
+    Task,
+    TextColumn,
+)
+from rich.text import Text
 
-from jellyfiler.ai_query import AiQueryError, AiUsage, preflight_check, suggest_search
+from jellyfiler.ai_query import (
+    AiQueryError,
+    preflight_check,
+    suggest_aside_kind,
+    suggest_search,
+)
 from jellyfiler.anilist import looks_like_anime, search_anime
+from jellyfiler.aside import (
+    JELLYFIN_EXTRAS_SUBDIR,
+    AsideKind,
+    aside_destination,
+    classify_aside,
+)
 from jellyfiler.cache import _DEFAULT_DB, Cache
+from jellyfiler.dedupe import (
+    DuplicateChoice,
+    PromptFn,
+    find_duplicate_groups,
+    quarantine_path,
+    resolve_duplicates,
+)
 from jellyfiler.executor import ExecutionError, execute
 from jellyfiler.guesser import guess
-from jellyfiler.interactive import prompt_episode_number, prompt_manual_title, prompt_tmdb_match
-from jellyfiler.junk import find_junk, is_junk, move_junk, report_junk
-from jellyfiler.models import MediaType, PlannedMove
+from jellyfiler.interactive import (
+    prompt_duplicate_choice,
+    prompt_episode_number,
+    prompt_manual_title,
+    prompt_tmdb_match,
+)
+from jellyfiler.jsonlog import NullLogger, open_logger
+from jellyfiler.models import GuessedMedia, MediaType, Plan, PlannedMove
 from jellyfiler.planner import build_plan, plan_move
-from jellyfiler.scanner import VIDEO_EXTENSIONS, find_media_files
+from jellyfiler.scanner import find_media_files
 from jellyfiler.tmdb import TmdbClient, TmdbMatch, best_match
 
 __version__ = "0.1.0"
@@ -61,6 +110,11 @@ def _main(
     pass
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# Tiny pure helpers
+# ───────────────────────────────────────────────────────────────────────────
+
+
 def _get_tmdb_client() -> TmdbClient:
     api_key = os.environ.get("TMDB_API_KEY", "")
     if not api_key:
@@ -87,14 +141,11 @@ def _title_variants(title: str) -> list[str]:
     import wordninja
 
     variants: list[str] = []
-    # Strip trailing Roman numeral: "Superman I" → "Superman"
     stripped = _strip_roman_suffix(title)
     if stripped != title:
         variants.append(stripped)
-    # Replace & with 'and': "Superman & Batman" → "Superman and Batman"
     if "&" in title:
         variants.append(title.replace("&", "and").replace("  ", " ").strip())
-    # Split CamelCase: "WonderWoman" → "Wonder Woman"
     spaced = _CAMEL_SPLIT.sub(" ", title)
     if spaced != title:
         variants.append(spaced)
@@ -119,15 +170,11 @@ def _resolve_match(
 ) -> TmdbMatch | None:
     """Return the best match, prompting the user if interactive and result is ambiguous."""
     match = best_match(matches, guessed_title, guessed_year)
-
     if match:
         return match
-
-    # No confident match found
     if interactive and matches:
         # We have TMDB results but none matched confidently — let the user pick
         return prompt_tmdb_match(file, guessed_title, matches, media_type)
-
     return None
 
 
@@ -142,19 +189,23 @@ def _fmt_size(total_bytes: int) -> str:
 def _simulate_empty_dirs(source: Path, files_leaving: set[Path]) -> tuple[int, int]:
     """Count directories that would become empty after files_leaving are removed.
 
-    Returns (would_remove_count, permission_error_count).
+    Mirrors the bottom-up rmdir logic in :func:`_remove_empty_dirs`, but never
+    touches the filesystem. PermissionError on iterdir is treated as
+    "non-empty" so we never claim we'd remove a dir we can't see into.
+
+    Returns ``(would_remove_count, permission_error_count)``.
     """
     remaining = {f for f in source.rglob("*") if f.is_file() and f not in files_leaving}
     would_remove: set[Path] = set()
-    permission_errors = 0
+    perm_errors = 0
     for dirpath in sorted(source.rglob("*"), reverse=True):
         if dirpath == source or not dirpath.is_dir():
             continue
         try:
             children = list(dirpath.iterdir())
         except PermissionError:
-            has_content = True  # can't read → assume non-empty, never mark for removal
-            permission_errors += 1
+            perm_errors += 1
+            has_content = True
         else:
             has_content = any(
                 c
@@ -163,7 +214,7 @@ def _simulate_empty_dirs(source: Path, files_leaving: set[Path]) -> tuple[int, i
             )
         if not has_content:
             would_remove.add(dirpath)
-    return len(would_remove), permission_errors
+    return len(would_remove), perm_errors
 
 
 def _print_summary(
@@ -174,8 +225,7 @@ def _print_summary(
     tmdb_errors: int,
     dry_run: bool,
     empty_dirs: int = 0,
-    permission_errors: int = 0,
-    ai_usage: AiUsage | None = None,
+    empty_dirs_simulated: bool = False,
 ) -> None:
     lines = [
         f"  [green]✓[/green]  Planned moves   [bold]{planned:>5}[/bold]",
@@ -183,24 +233,1206 @@ def _print_summary(
         f"  [dim]🗑  Junk files     [bold]{junk_count:>5}[/bold]  ({_fmt_size(junk_bytes)})[/dim]",
     ]
     if empty_dirs:
-        label = "Empty dirs (sim)" if dry_run else "Empty dirs removed"
-        lines.append(f"  [dim]📁  {label}[bold]{empty_dirs:>5}[/bold][/dim]")
-    if permission_errors:
-        lines.append(f"  [yellow]🔒  Permission errors[bold]{permission_errors:>4}[/bold][/yellow]")
-    if ai_usage and (ai_usage.input_tokens or ai_usage.output_tokens):
-        cost = ai_usage.cost_eur()
-        lines.append(
-            f"  [dim]🤖  AI tokens  "
-            f"[bold]{ai_usage.input_tokens:>6}[/bold] in "
-            f"[bold]{ai_usage.output_tokens:>5}[/bold] out  "
-            f"≈ €{cost:.4f}[/dim]"
-        )
+        label = "Empty dirs (sim)" if empty_dirs_simulated else "Empty dirs removed"
+        lines.append(f"  [dim]📂 {label} [bold]{empty_dirs:>5}[/bold][/dim]")
     if tmdb_errors:
         lines.append(f"  [red]✗[/red]  TMDB errors     [bold]{tmdb_errors:>5}[/bold]")
     if dry_run:
-        apply_cmd = "--apply --cleanup-empty-dirs" if empty_dirs else "--apply"
-        lines.append(f"\n  [bold cyan]DRY RUN[/bold cyan] — pass {apply_cmd} to execute")
+        lines.append("\n  [bold cyan]DRY RUN[/bold cyan] — pass --apply to move files")
     console.print(Panel("\n".join(lines), title="[bold]Summary[/bold]", border_style="cyan"))
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Pipeline context + per-file outcome
+# ───────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class OrganizeContext:
+    """Bag of pipeline state shared across the per-file processing.
+
+    All the per-file branches in ``_process_one_file`` look up their dependencies
+    here instead of taking ten parameters. Mutable state (``ai_disabled``) lives
+    here too so the caller can see updates.
+
+    ``parallel`` controls the TMDB-lookup worker pool size. 1 = sequential
+    (default, identical to the pre-parallel behaviour); higher = use that many
+    threads for the network-bound lookup chain. Phase 1 (file classification)
+    and phase 3 (interactive resolution) always run on the main thread.
+    """
+
+    source: Path
+    dest: Path
+    tmdb: TmdbClient
+    cache: Cache
+    interactive: bool
+    use_ai: bool
+    forced_media_type: MediaType
+    rich_names: bool
+    quiet: bool
+    force: bool
+    ai_disabled: bool = False  # toggled to True if the user opts out mid-run
+    parallel: int = 1
+    logger: NullLogger = field(default_factory=NullLogger)
+    # Memoise Haiku aside-classification results for the duration of a run.
+    # Keyed by (parent_dir_name, filename); values are the AsideKind label
+    # string returned by suggest_aside_kind (or "MAIN_MEDIA" / "" for misses).
+    ai_aside_cache: dict[tuple[str, str], str] = field(default_factory=dict)
+
+
+@dataclass
+class ClassifiedFile:
+    """Phase-1 outcome — what we know about a file before any TMDB call.
+
+    ``kind`` is one of:
+        ``cached``        — already moved in a prior run, skip silently
+        ``aside``         — non-canonical content (sample, NCOP, DVD Extras …);
+                            ``aside_kind`` carries the typed classification so
+                            the caller can route it (Jellyfin extras subdir or
+                            DISCARD)
+        ``skipped``       — pre-decided skip (unknown type, no title, ...);
+                            ``move`` carries the skipped PlannedMove
+        ``pinned``        — TMDB lookup short-circuits via cache.get_pinned();
+                            ``move`` carries the resolved PlannedMove
+        ``needs_lookup``  — phase-2 must run the TMDB chain on ``guessed``
+    """
+
+    file: Path
+    kind: str
+    guessed: GuessedMedia | None = None  # set for needs_lookup
+    move: PlannedMove | None = None  # set for skipped / pinned
+    aside_kind: AsideKind | None = None  # set for aside
+
+
+@dataclass
+class FileResult:
+    """Outcome of processing one file.
+
+    ``kind`` is one of:
+        ``planned``    — :attr:`move` is set (may be skipped=True)
+        ``aside``      — non-canonical content; :attr:`aside_kind` is set so
+                         the caller can route it (Jellyfin extras vs DISCARD)
+        ``cached``     — already-moved file, skip silently
+        ``tmdb_error`` — fatal lookup error; caller should break out of the loop
+        ``ai_abort``   — user declined to disable AI after an error; abort run
+    """
+
+    kind: str
+    move: PlannedMove | None = None
+    error_msg: str = ""
+    aside_kind: AsideKind | None = None
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Argument validation
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def _validate_in_place_args(
+    in_place: bool,
+    dest: Path | None,
+    source: Path,
+    cleanup_empty_dirs: bool,
+) -> Path:
+    """Resolve ``dest`` for in-place vs separate-dest mode and validate flags.
+
+    Returns the effective destination directory. Raises typer.Exit on bad
+    flag combinations.
+    """
+    if in_place:
+        if dest is not None:
+            err_console.print(
+                "[bold red]Error:[/bold red] Cannot combine --in-place with a DEST argument."
+            )
+            raise typer.Exit(1)
+        console.print(f"[bold yellow]IN-PLACE mode — reorganizing within {source}[/bold yellow]")
+        dest = source
+    elif dest is None:
+        err_console.print("[bold red]Error:[/bold red] DEST is required unless --in-place is used.")
+        raise typer.Exit(1)
+
+    if cleanup_empty_dirs and not in_place:
+        err_console.print(
+            "[bold red]Error:[/bold red] --cleanup-empty-dirs only makes sense with --in-place."
+        )
+        raise typer.Exit(1)
+
+    return dest
+
+
+def _validate_dedupe_flags(
+    remove_duplicates: bool,
+    i_mean_it: bool,
+    quarantine_duplicates: bool,
+) -> None:
+    """Run the safety gates for the dedupe flags. Raises typer.Exit on misuse."""
+    if remove_duplicates and not i_mean_it:
+        err_console.print(
+            "\n"
+            "[bold white on red]"
+            " ╔════════════════════════════════════════════════════════════════════╗ \n"
+            " ║              ⚠  PERMANENT FILE DELETION REQUESTED  ⚠               ║ \n"
+            " ║                                                                    ║ \n"
+            " ║   --remove-duplicates will PERMANENTLY DELETE the lower-quality    ║ \n"
+            " ║   copy of every duplicate-destination pair found on this run.      ║ \n"
+            " ║   Files are unlinked from disk. There is no undo.                  ║ \n"
+            " ║                                                                    ║ \n"
+            " ║   To actually run, you MUST also pass --i-mean-it.                 ║ \n"
+            " ║   This double-flag protects against accidents and cron typos.      ║ \n"
+            " ╚════════════════════════════════════════════════════════════════════╝ "
+            "[/bold white on red]"
+        )
+        err_console.print(
+            "\n[bold red]Aborting. Add --i-mean-it to confirm permanent deletion.[/bold red]\n"
+        )
+        raise typer.Exit(1)
+    if i_mean_it and not remove_duplicates:
+        err_console.print(
+            "[bold red]Error:[/bold red] --i-mean-it has no effect without --remove-duplicates."
+        )
+        raise typer.Exit(1)
+    if quarantine_duplicates and remove_duplicates:
+        err_console.print(
+            "[bold red]Error:[/bold red] Cannot combine --quarantine-duplicates with "
+            "--remove-duplicates. Quarantine moves losers to .aside/duplicates/ "
+            "(recoverable); remove deletes them."
+        )
+        raise typer.Exit(1)
+
+
+def _validate_remove_discards_flags(remove_discards: bool, i_mean_it: bool) -> None:
+    """Safety gate for ``--remove-discards`` on the organize command.
+
+    --remove-discards alone aborts with a big red warning. With --i-mean-it,
+    files classified DISCARD (samples, NCOP/NCED, .nfo, hash-named, RARBG promos)
+    are unlinked. Without either flag, those files go to dest/.aside/ as before.
+    """
+    if remove_discards and not i_mean_it:
+        err_console.print(
+            "\n"
+            "[bold white on red]"
+            " ╔════════════════════════════════════════════════════════════════════╗ \n"
+            " ║          ⚠  PERMANENT FILE DELETION REQUESTED (DISCARDS)  ⚠        ║ \n"
+            " ║                                                                    ║ \n"
+            " ║   --remove-discards will PERMANENTLY DELETE every file classified  ║ \n"
+            " ║   as DISCARD: samples, NCOP/NCED tracks, hash-named files, .nfo /  ║ \n"
+            " ║   .txt / .jpg sidecars, RARBG promo videos. Unlinked from disk.    ║ \n"
+            " ║                                                                    ║ \n"
+            " ║   To actually run, you MUST also pass --i-mean-it.                 ║ \n"
+            " ║   Without it, those files go to dest/.aside/ (recoverable).        ║ \n"
+            " ╚════════════════════════════════════════════════════════════════════╝ "
+            "[/bold white on red]"
+        )
+        err_console.print(
+            "\n[bold red]Aborting. Add --i-mean-it to confirm permanent deletion.[/bold red]\n"
+        )
+        raise typer.Exit(1)
+    # i_mean_it without remove_discards is allowed — the same flag is used by dedupe.
+
+
+def _ai_preflight(use_ai: bool, quiet: bool) -> None:
+    """Run the AI preflight check if --use-ai is on. Raises typer.Exit on failure."""
+    if not use_ai:
+        return
+    ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not ai_key:
+        err_console.print(
+            "[bold red]Error:[/bold red] --use-ai requires ANTHROPIC_API_KEY to be set."
+        )
+        raise typer.Exit(1)
+    if not quiet:
+        console.print("[dim]Checking Anthropic API key...[/dim]")
+    if not preflight_check(ai_key):
+        err_console.print(
+            "[bold red]Error:[/bold red] Anthropic API key check failed — "
+            "verify ANTHROPIC_API_KEY is valid."
+        )
+        raise typer.Exit(1)
+    if not quiet:
+        console.print("[green]✓[/green] Anthropic API key OK")
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# TMDB lookup chain (TMDB → variants → AniList → AI fallback)
+# ───────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class LookupResult:
+    """Outcome of the TMDB+AniList+AI search chain for one file."""
+
+    matches: list[TmdbMatch] = field(default_factory=list)
+    search_title: str = ""
+    status: str = "ok"  # "ok" | "tmdb_error" | "ai_abort"
+    error_msg: str = ""
+
+
+def _lookup_match_chain(
+    guessed: GuessedMedia,
+    file: Path,
+    ctx: OrganizeContext,
+    progress: Progress | None = None,
+) -> LookupResult:
+    """Run the full search chain. Updates ``ctx.ai_disabled`` if the user opts out."""
+    cache_year = guessed.year if guessed.media_type == MediaType.MOVIE else None
+
+    # Step 1: TMDB lookup with cache
+    try:
+        cached = ctx.cache.get_tmdb(guessed.title, cache_year, guessed.media_type)
+        if cached is not None:
+            matches = cached
+        elif guessed.media_type == MediaType.MOVIE:
+            matches = ctx.tmdb.search_movie(guessed.title, guessed.year)
+            ctx.cache.set_tmdb(guessed.title, guessed.year, guessed.media_type, matches)
+        else:
+            matches = ctx.tmdb.search_tv(guessed.title, None)
+            ctx.cache.set_tmdb(guessed.title, None, guessed.media_type, matches)
+    except httpx.HTTPStatusError as exc:
+        err_console.print(
+            f"\n[bold red]TMDB error: {exc.response.status_code} "
+            f"{exc.response.reason_phrase} — stopping.[/bold red]"
+        )
+        return LookupResult(status="tmdb_error", error_msg=str(exc))
+    except Exception as exc:
+        err_console.print(f"\n[bold red]TMDB error: {exc} — stopping.[/bold red]")
+        return LookupResult(status="tmdb_error", error_msg=str(exc))
+
+    # Step 2: Title variant retries
+    search_title = guessed.title
+    if not best_match(matches, guessed.title, guessed.year):
+        for variant in _title_variants(guessed.title):
+            try:
+                retry = (
+                    ctx.tmdb.search_movie(variant, guessed.year)
+                    if guessed.media_type == MediaType.MOVIE
+                    else ctx.tmdb.search_tv(variant, None)
+                )
+                if retry and best_match(retry, variant, guessed.year):
+                    matches = retry
+                    search_title = variant
+                    ctx.cache.set_tmdb(variant, cache_year, guessed.media_type, retry)
+                    break
+            except Exception:
+                pass
+
+    # Step 3: AniList fallback for anime episodes
+    if (
+        not best_match(matches, search_title, guessed.year)
+        and guessed.media_type == MediaType.EPISODE
+        and looks_like_anime(file.name)
+    ):
+        try:
+            al_cached = ctx.cache.get_tmdb(guessed.title, guessed.year, MediaType.EPISODE)
+            if al_cached is None:
+                al_matches = search_anime(guessed.title)
+                ctx.cache.set_tmdb(guessed.title, guessed.year, MediaType.EPISODE, al_matches)
+            else:
+                al_matches = al_cached
+            if al_matches:
+                if not ctx.quiet:
+                    console.print(f"[dim]TMDB missed '{guessed.title}' — trying AniList...[/dim]")
+                matches = al_matches
+                search_title = guessed.title
+        except Exception as exc:
+            console.print(f"[dim]AniList fallback failed for '{file.name}': {exc}[/dim]")
+
+    # Step 4: AI fallback (paid)
+    if ctx.use_ai and not ctx.ai_disabled and not best_match(matches, search_title, guessed.year):
+        ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if ai_key:
+            try:
+                suggestion, _usage = suggest_search(
+                    file.parent.name,
+                    file.name,
+                    ai_key,
+                    is_tv=guessed.media_type == MediaType.EPISODE,
+                )
+            except AiQueryError as exc:
+                err_console.print(f"\n[bold red]Anthropic API error: {exc}[/bold red]")
+                # Parallel mode: skip the interactive disable prompt — multiple
+                # worker threads can't share stdin. Treat as fatal; user can
+                # retry without --use-ai or with --parallel 1.
+                if ctx.interactive and ctx.parallel <= 1:
+                    if progress is not None:
+                        progress.stop()
+                    disable = typer.confirm("Disable AI and continue without it?")
+                    if progress is not None:
+                        progress.start()
+                    if disable:
+                        ctx.ai_disabled = True
+                    else:
+                        return LookupResult(
+                            matches=matches,
+                            search_title=search_title,
+                            status="ai_abort",
+                            error_msg=str(exc),
+                        )
+                else:
+                    return LookupResult(
+                        matches=matches,
+                        search_title=search_title,
+                        status="ai_abort",
+                        error_msg=str(exc),
+                    )
+            else:
+                if suggestion:
+                    ai_title = str(suggestion.get("title", ""))
+                    ai_year_raw = suggestion.get("year")
+                    ai_year = int(ai_year_raw) if isinstance(ai_year_raw, (int, float)) else None
+                    if ai_title and ai_title != search_title:
+                        console.print(
+                            f"[dim]AI query suggestion for '{guessed.title}': "
+                            f"'{ai_title}' ({ai_year})[/dim]"
+                        )
+                        try:
+                            ai_retry = (
+                                ctx.tmdb.search_movie(ai_title, ai_year)
+                                if guessed.media_type == MediaType.MOVIE
+                                else ctx.tmdb.search_tv(ai_title, None)
+                            )
+                            if ai_retry:
+                                matches = ai_retry
+                                search_title = ai_title
+                                ctx.cache.set_tmdb(
+                                    ai_title, cache_year, guessed.media_type, ai_retry
+                                )
+                        except Exception:
+                            pass
+
+    return LookupResult(matches=matches, search_title=search_title, status="ok")
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Per-file processing
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def _skipped_move(
+    file: Path,
+    dest: Path,
+    media_type: MediaType,
+    matched_title: str,
+    reason: str,
+    tmdb_id: int | None = None,
+) -> PlannedMove:
+    """Build a skipped PlannedMove with a clear reason."""
+    return PlannedMove(
+        source=file,
+        destination=dest,
+        media_type=media_type,
+        tmdb_id=tmdb_id,
+        matched_title=matched_title,
+        confidence="low",
+        skipped=True,
+        skip_reason=reason,
+    )
+
+
+def _classify_file(
+    file: Path,
+    ctx: OrganizeContext,
+    progress: Progress | None = None,
+) -> ClassifiedFile:
+    """Phase 1: fast, sequential classification.
+
+    Runs the cheap parts (cache lookup, junk filter, guessit parse) and decides
+    whether the file:
+      * is already done / junk → no further work
+      * has a pre-resolved skip reason → done with a skipped PlannedMove
+      * has a pinned TMDB match → done with the resolved PlannedMove
+      * needs the (slow, network-bound) TMDB chain in phase 2
+
+    The interactive "missing title" prompt also fires here — it's the only
+    interactive prompt that gates the lookup, so it must run before phase 2.
+    """
+    # 1. Cached skip
+    if not ctx.force and ctx.cache.already_moved(file):
+        if not ctx.quiet:
+            console.print(f"[dim]SKIP (cached):[/dim] {file.name}")
+        ctx.logger.debug("classify_cached", file=file)
+        return ClassifiedFile(file=file, kind="cached")
+
+    # 2. Aside filter (non-canonical content: extras, samples, NFOs, NCOP/NCED…)
+    aside_kind = classify_aside(file)
+    if aside_kind is not None:
+        if not ctx.quiet:
+            console.print(f"[dim]ASIDE ({aside_kind.value}):[/dim] {file.name}")
+        ctx.logger.info("classify_aside", file=file, aside_kind=aside_kind.value)
+        return ClassifiedFile(file=file, kind="aside", aside_kind=aside_kind)
+
+    # 3. Guess
+    guessed = guess(file)
+    if ctx.forced_media_type != MediaType.UNKNOWN:
+        guessed.media_type = ctx.forced_media_type
+
+    # 4. Unknown type — skipped move
+    if guessed.media_type == MediaType.UNKNOWN:
+        if not ctx.quiet:
+            console.print(f"[yellow]SKIP (unknown type):[/yellow] {file.name}")
+        return ClassifiedFile(
+            file=file,
+            kind="skipped",
+            move=_skipped_move(
+                file,
+                ctx.dest,
+                MediaType.UNKNOWN,
+                guessed.title or file.name,
+                "Could not determine media type — pass --type to force",
+            ),
+        )
+
+    # 5. Missing title — interactive prompt or skip (interactive runs on main thread)
+    if not guessed.title:
+        if ctx.interactive:
+            if progress is not None:
+                progress.stop()
+            manual = prompt_manual_title(file.name, "")
+            if progress is not None:
+                progress.start()
+            if manual:
+                guessed.title = manual
+            else:
+                return ClassifiedFile(
+                    file=file,
+                    kind="skipped",
+                    move=_skipped_move(
+                        file,
+                        ctx.dest,
+                        guessed.media_type,
+                        file.name,
+                        "User skipped — no title provided",
+                    ),
+                )
+        else:
+            if not ctx.quiet:
+                console.print(f"[yellow]SKIP (no title parsed):[/yellow] {file.name}")
+            return ClassifiedFile(
+                file=file,
+                kind="skipped",
+                move=_skipped_move(
+                    file,
+                    ctx.dest,
+                    guessed.media_type,
+                    file.name,
+                    "guessit could not extract a title — run with --interactive",
+                ),
+            )
+
+    cache_year = guessed.year if guessed.media_type == MediaType.MOVIE else None
+
+    # 6. Pinned cache hit
+    pinned = ctx.cache.get_pinned(guessed.title, cache_year, guessed.media_type)
+    if pinned:
+        if not ctx.quiet:
+            console.print(f"[dim]PINNED:[/dim] {guessed.title} → {pinned.title} ({pinned.year})")
+        ctx.logger.info(
+            "classify_pinned",
+            file=file,
+            guessed_title=guessed.title,
+            tmdb_id=pinned.tmdb_id,
+            tmdb_title=pinned.title,
+            tmdb_year=pinned.year,
+        )
+        return ClassifiedFile(
+            file=file,
+            kind="pinned",
+            guessed=guessed,
+            move=plan_move(guessed, pinned, ctx.dest, file, rich_names=ctx.rich_names),
+        )
+
+    # 7. Needs the TMDB lookup chain
+    ctx.logger.debug("classify_needs_lookup", file=file, guessed_title=guessed.title)
+    return ClassifiedFile(file=file, kind="needs_lookup", guessed=guessed)
+
+
+def _finalize_after_lookup(
+    classified: ClassifiedFile,
+    lookup: LookupResult,
+    ctx: OrganizeContext,
+    progress: Progress | None = None,
+) -> FileResult:
+    """Phase 3: turn (classified file + lookup result) into a FileResult.
+
+    Runs match resolution (which may prompt interactively for ambiguous matches),
+    the bare-episode prompt, and the final ``plan_move`` + ``set_pinned`` call.
+    Always runs on the main thread so interactive prompts work.
+    """
+    file = classified.file
+    guessed = classified.guessed
+    assert guessed is not None  # invariant: needs_lookup → guessed is set
+
+    if lookup.status == "tmdb_error":
+        return FileResult(kind="tmdb_error", error_msg=lookup.error_msg)
+    if lookup.status == "ai_abort":
+        return FileResult(kind="ai_abort", error_msg=lookup.error_msg)
+
+    cache_year = guessed.year if guessed.media_type == MediaType.MOVIE else None
+
+    # Resolve match (interactive prompt if ambiguous)
+    if ctx.interactive and progress is not None:
+        progress.stop()
+    match = _resolve_match(
+        file,
+        lookup.search_title,
+        guessed.year,
+        lookup.matches,
+        guessed.media_type,
+        ctx.interactive,
+    )
+    if ctx.interactive and progress is not None:
+        progress.start()
+
+    # No-match path → ask Haiku for a second-chance aside classification.
+    # Pattern-based classify_aside (phase 1) already missed it, and TMDB came up
+    # empty / ambiguous. Haiku can read the parent-dir + filename together and
+    # recognise foreign-language extras dirs (Bonusy/, Doplnki/, …), ad-hoc
+    # names, or extras that don't fit the parent-dir-name regex catalogue.
+    if match is None:
+        ai_kind = _try_ai_aside_classification(file, ctx)
+        if ai_kind is not None and ai_kind != AsideKind.DISCARD:
+            ctx.logger.info(
+                "classify_aside_via_ai",
+                file=file,
+                aside_kind=ai_kind.value,
+            )
+            return FileResult(kind="aside", aside_kind=ai_kind)
+
+    # Non-interactive ambiguous → skip (after AI had its shot above)
+    if not match and not ctx.interactive and lookup.matches:
+        if not ctx.quiet:
+            console.print(
+                f"[yellow]SKIP (ambiguous):[/yellow] '{guessed.title}' — "
+                f"{len(lookup.matches)} TMDB results, none matched confidently. "
+                "Run with --interactive to pick manually."
+            )
+        return FileResult(
+            kind="planned",
+            move=_skipped_move(
+                file,
+                ctx.dest,
+                guessed.media_type,
+                guessed.title,
+                f"Ambiguous: {len(lookup.matches)} results, no confident match. Use --interactive.",
+            ),
+        )
+
+    # Bare-episode interactive prompt
+    if (
+        match is not None
+        and guessed.media_type == MediaType.EPISODE
+        and guessed.episode is None
+        and ctx.interactive
+    ):
+        if progress is not None:
+            progress.stop()
+        try:
+            season_num = guessed.season or 1
+            episodes = ctx.tmdb.get_season_episodes(match.tmdb_id, season_num)
+            if episodes:
+                picked = prompt_episode_number(file.name, episodes)
+                if picked is not None:
+                    guessed.episode = picked
+        except Exception as exc:
+            console.print(f"[dim]Could not fetch episode list: {exc}[/dim]")
+        if progress is not None:
+            progress.start()
+
+    # Plan + pin
+    move = plan_move(guessed, match, ctx.dest, file, rich_names=ctx.rich_names)
+    if match:
+        ctx.cache.set_pinned(lookup.search_title, cache_year, guessed.media_type, match)
+        ctx.logger.info(
+            "match_resolved",
+            file=file,
+            search_title=lookup.search_title,
+            tmdb_id=match.tmdb_id,
+            tmdb_title=match.title,
+            tmdb_year=match.year,
+            confidence=move.confidence,
+            pinned=True,
+        )
+        return FileResult(kind="planned", move=move)
+
+    if move.skipped:
+        ctx.logger.warning(
+            "match_skipped",
+            file=file,
+            guessed_title=guessed.title,
+            reason=move.skip_reason,
+        )
+    return FileResult(kind="planned", move=move)
+
+
+def _try_ai_aside_classification(file: Path, ctx: OrganizeContext) -> AsideKind | None:
+    """Ask Haiku to classify ``file`` as an aside-kind. Cached per run.
+
+    Returns ``None`` if AI is disabled, the model isn't sure, or the response
+    says ``MAIN_MEDIA`` (i.e., Haiku thinks this is real media — let the
+    normal "no TMDB match" skip happen).
+    """
+    if not ctx.use_ai or ctx.ai_disabled:
+        return None
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+
+    cache_key = (file.parent.name, file.name)
+    if cache_key in ctx.ai_aside_cache:
+        cached = ctx.ai_aside_cache[cache_key]
+        return AsideKind(cached.lower()) if cached and cached != "MAIN_MEDIA" else None
+
+    try:
+        kind_str, _usage = suggest_aside_kind(file.parent.name, file.name, api_key)
+    except AiQueryError as exc:
+        # Don't abort the whole run — log and treat as "no AI suggestion".
+        ctx.logger.warning("ai_aside_classify_error", file=file, error=str(exc))
+        ctx.ai_aside_cache[cache_key] = ""
+        return None
+
+    if kind_str is None:
+        ctx.ai_aside_cache[cache_key] = ""
+        return None
+    ctx.ai_aside_cache[cache_key] = kind_str
+
+    if kind_str == "MAIN_MEDIA":
+        return None
+    try:
+        return AsideKind(kind_str.lower())
+    except ValueError:
+        return None
+
+
+def _process_one_file(
+    file: Path,
+    ctx: OrganizeContext,
+    progress: Progress | None = None,
+) -> FileResult:
+    """Sequential per-file processing: phase 1 → phase 2 → phase 3.
+
+    Used by the sequential pipeline runner. The parallel runner calls phase 1
+    and phase 3 directly so it can fan phase 2 out across worker threads.
+    """
+    classified = _classify_file(file, ctx, progress=progress)
+    if classified.kind == "cached":
+        return FileResult(kind="cached")
+    if classified.kind == "aside":
+        return FileResult(kind="aside", aside_kind=classified.aside_kind)
+    if classified.kind in ("skipped", "pinned"):
+        assert classified.move is not None
+        return FileResult(kind="planned", move=classified.move)
+    # needs_lookup
+    assert classified.guessed is not None
+    lookup = _lookup_match_chain(classified.guessed, file, ctx, progress=progress)
+    return _finalize_after_lookup(classified, lookup, ctx, progress=progress)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Pipeline runner (the loop) — used by both organize and dedupe
+# ───────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class PipelineResult:
+    """Aggregated outcomes from running the per-file loop over many files."""
+
+    planned_moves: list[PlannedMove] = field(default_factory=list)
+    # (path, AsideKind) pairs — kind drives later routing decisions:
+    # DISCARD → .aside/ (or unlinked with --remove-discards),
+    # everything else → Jellyfin extras subdir of the parent media item.
+    aside_files: list[tuple[Path, AsideKind]] = field(default_factory=list)
+    tmdb_errors: int = 0
+    aborted: bool = False  # set when caller hit ai_abort or fatal tmdb error
+
+
+def _run_pipeline(files: list[Path], ctx: OrganizeContext) -> PipelineResult:
+    """Run :func:`_process_one_file` over each input file with a progress bar.
+
+    Dispatches to :func:`_run_pipeline_parallel` when ``ctx.parallel > 1``.
+    """
+    if ctx.parallel > 1:
+        return _run_pipeline_parallel(files, ctx)
+
+    out = PipelineResult()
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Starting...", total=len(files))
+        for file in files:
+            label = file.name if len(file.name) <= 55 else file.name[:52] + "..."
+            progress.update(task, description=f"[cyan]{label}[/cyan]")
+
+            result = _process_one_file(file, ctx, progress=progress)
+            if result.kind == "aside":
+                assert result.aside_kind is not None
+                out.aside_files.append((file, result.aside_kind))
+            elif result.kind == "planned" and result.move is not None:
+                out.planned_moves.append(result.move)
+            elif result.kind == "tmdb_error":
+                out.tmdb_errors += 1
+                out.aborted = True
+                break
+            elif result.kind == "ai_abort":
+                err_console.print("[bold red]Stopping.[/bold red]")
+                out.aborted = True
+                break
+            # 'cached' — silently skip
+            progress.advance(task)
+    return out
+
+
+class _ActiveCounter:
+    """Thread-safe live count of workers currently inside the lookup chain.
+
+    Used by :class:`_ActiveWorkersColumn` to render a live "⚙ N/M" indicator
+    in the progress bar so the operator can see whether the parallel pool
+    is saturated or idling.
+    """
+
+    __slots__ = ("_n", "_lock")
+
+    def __init__(self) -> None:
+        self._n = 0
+        self._lock = threading.Lock()
+
+    def inc(self) -> None:
+        with self._lock:
+            self._n += 1
+
+    def dec(self) -> None:
+        with self._lock:
+            self._n -= 1
+
+    def get(self) -> int:
+        with self._lock:
+            return self._n
+
+
+class _ActiveWorkersColumn(ProgressColumn):
+    """Renders ⚙ <active>/<max> in the progress bar — refreshes ~10x/sec."""
+
+    def __init__(self, counter: _ActiveCounter, max_workers: int) -> None:
+        super().__init__()
+        self._counter = counter
+        self._max = max_workers
+
+    def render(self, task: Task) -> Text:
+        return Text(f"⚙ {self._counter.get()}/{self._max}", style="cyan")
+
+
+def _tracked_lookup(
+    counter: _ActiveCounter,
+    guessed: GuessedMedia,
+    file: Path,
+    ctx: OrganizeContext,
+) -> LookupResult:
+    """Wrap ``_lookup_match_chain`` so we can count threads in flight."""
+    counter.inc()
+    try:
+        return _lookup_match_chain(guessed, file, ctx, progress=None)
+    finally:
+        counter.dec()
+
+
+def _run_pipeline_parallel(files: list[Path], ctx: OrganizeContext) -> PipelineResult:
+    """Three-phase pipeline that parallelises the TMDB lookup phase.
+
+    Phase 1: classify every file sequentially (cache, junk, guess, pinned, ...).
+    Phase 2: fan TMDB lookups out across ``ctx.parallel`` worker threads.
+    Phase 3: walk back through the classifications in order, attaching the
+             lookup result and running the interactive resolution path.
+
+    Output ordering is preserved by walking ``classifications`` in input order
+    in phase 3 — even though phase 2 completes futures out of order.
+
+    Phase 2 shows a live ⚙ <active>/<max> worker count in the progress bar
+    so you can see whether the rate limiter is saturating the pool.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    out = PipelineResult()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        # ── Phase 1: classify ──────────────────────────────────────────────
+        classify_task = progress.add_task("Classifying files...", total=len(files))
+        classifications: list[ClassifiedFile] = []
+        for file in files:
+            label = file.name if len(file.name) <= 55 else file.name[:52] + "..."
+            progress.update(classify_task, description=f"[cyan]{label}[/cyan]")
+            classifications.append(_classify_file(file, ctx, progress=progress))
+            progress.advance(classify_task)
+
+        # ── Phase 2: parallel TMDB lookups ──────────────────────────────────
+        needs_lookup = [cf for cf in classifications if cf.kind == "needs_lookup"]
+        lookup_results: dict[Path, LookupResult] = {}
+
+        if needs_lookup:
+            workers = max(1, ctx.parallel)
+            active = _ActiveCounter()
+            # Splice a live "⚙ N/M workers" column into the existing progress
+            # bar for the duration of phase 2. Rich refreshes ~10×/sec so the
+            # count updates in real time as workers enter/leave the lookup chain.
+            workers_col = _ActiveWorkersColumn(active, workers)
+            progress.columns = (*progress.columns, workers_col)
+            lookup_task = progress.add_task(
+                f"TMDB lookups (×{workers} workers)...", total=len(needs_lookup)
+            )
+            try:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tmdb") as ex:
+                    future_to_cf: dict[Any, ClassifiedFile] = {}
+                    for cf in needs_lookup:
+                        assert cf.guessed is not None  # invariant of needs_lookup
+                        future_to_cf[
+                            ex.submit(_tracked_lookup, active, cf.guessed, cf.file, ctx)
+                        ] = cf
+                    from concurrent.futures import as_completed
+
+                    for fut in as_completed(future_to_cf):
+                        cf = future_to_cf[fut]
+                        try:
+                            lookup_results[cf.file] = fut.result()
+                        except Exception as exc:
+                            # A worker raised — record as tmdb_error so phase 3 aborts cleanly.
+                            lookup_results[cf.file] = LookupResult(
+                                status="tmdb_error", error_msg=str(exc)
+                            )
+                        progress.advance(lookup_task)
+            finally:
+                # Drop the worker column when phase 2 ends so phase 3's bar
+                # doesn't show a stale "0/N" indicator.
+                progress.columns = tuple(c for c in progress.columns if c is not workers_col)
+
+        # ── Phase 3: finalize in original order ────────────────────────────
+        finalize_task = progress.add_task("Finalizing matches...", total=len(classifications))
+        for cf in classifications:
+            progress.advance(finalize_task)
+            if cf.kind == "cached":
+                continue
+            if cf.kind == "aside":
+                assert cf.aside_kind is not None
+                out.aside_files.append((cf.file, cf.aside_kind))
+                continue
+            if cf.kind in ("skipped", "pinned"):
+                assert cf.move is not None
+                out.planned_moves.append(cf.move)
+                continue
+            # needs_lookup
+            lookup = lookup_results[cf.file]
+            result = _finalize_after_lookup(cf, lookup, ctx, progress=progress)
+            if result.kind == "tmdb_error":
+                out.tmdb_errors += 1
+                out.aborted = True
+                break
+            if result.kind == "ai_abort":
+                err_console.print("[bold red]Stopping.[/bold red]")
+                out.aborted = True
+                break
+            if result.kind == "aside":
+                # AI's second-chance classification reclassified a TMDB-miss as bonus
+                # content. Add to the aside list so it routes via _plan_aside_routing.
+                assert result.aside_kind is not None
+                out.aside_files.append((cf.file, result.aside_kind))
+                continue
+            if result.kind == "planned" and result.move is not None:
+                out.planned_moves.append(result.move)
+
+    return out
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Dedupe action helpers (delete / quarantine / remove dirs)
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def _apply_dedupe_actions(
+    losers_to_delete: list[PlannedMove],
+    losers_to_quarantine: list[PlannedMove],
+    dirs_to_remove: set[Path],
+    source: Path,
+    dest: Path,
+) -> None:
+    """Apply the post-execute file actions for the dedupe pass.
+
+    Quarantine first (move → .aside/duplicates/), then delete loser files,
+    then rmtree the marked parent directories. Each step swallows individual
+    errors so one bad file doesn't abort the whole cleanup.
+    """
+    for loser in losers_to_quarantine:
+        qpath = quarantine_path(loser, source, dest)
+        try:
+            qpath.parent.mkdir(parents=True, exist_ok=True)
+            if qpath.exists():
+                console.print(f"[dim]  quarantine target exists, skipping: {qpath}[/dim]")
+                continue
+            shutil.move(str(loser.source), str(qpath))
+            console.print(f"[dim]  duplicate → {qpath}[/dim]")
+        except Exception as exc:
+            err_console.print(f"[yellow]Could not quarantine {loser.source}: {exc}[/yellow]")
+
+    for loser in losers_to_delete:
+        try:
+            if loser.source.exists():
+                loser.source.unlink()
+                console.print(f"[red]  deleted duplicate: {loser.source}[/red]")
+        except Exception as exc:
+            err_console.print(f"[yellow]Could not delete {loser.source}: {exc}[/yellow]")
+
+    for d in dirs_to_remove:
+        try:
+            if d.exists():
+                shutil.rmtree(d)
+                console.print(f"[red]  removed directory: {d}[/red]")
+        except Exception as exc:
+            err_console.print(f"[yellow]Could not remove {d}: {exc}[/yellow]")
+
+
+def _resolve_dedupe(
+    plan: Plan,
+    *,
+    interactive: bool,
+    quarantine_duplicates: bool,
+    remove_duplicates: bool,
+    quiet: bool,
+    dest: Path,
+) -> tuple[Plan, list[PlannedMove], list[PlannedMove], set[Path]]:
+    """Find duplicate destinations in *plan* and return the resolution plan.
+
+    Returns (cleaned_plan, losers_to_delete, losers_to_quarantine, dirs_to_remove).
+    Empty inputs and empty groups both return the original plan unchanged.
+    """
+    duplicate_groups = find_duplicate_groups(plan.moves)
+    if not duplicate_groups:
+        return plan, [], [], set()
+
+    if not quiet:
+        console.print(
+            f"\n[bold yellow]Duplicate destinations detected:[/bold yellow] "
+            f"{len(duplicate_groups)} group(s) — resolving..."
+        )
+
+    prompt_fn: PromptFn | None
+    run_interactive: bool
+    if quarantine_duplicates:
+
+        def _quarantine_prompt(_group: list[PlannedMove]) -> DuplicateChoice:
+            return DuplicateChoice(DuplicateChoice.ALWAYS_QUARANTINE)
+
+        prompt_fn = _quarantine_prompt
+        run_interactive = True
+    elif interactive:
+        prompt_fn = prompt_duplicate_choice
+        run_interactive = True
+    else:
+        prompt_fn = None
+        run_interactive = False
+
+    plan, losers_to_delete, losers_to_quarantine, dirs_to_remove = resolve_duplicates(
+        plan,
+        interactive=run_interactive,
+        auto_remove=remove_duplicates,
+        prompt=prompt_fn,
+    )
+
+    if not quiet:
+        if losers_to_delete:
+            console.print(
+                f"[bold red]{len(losers_to_delete)} duplicate loser(s) "
+                "will be PERMANENTLY DELETED[/bold red]"
+            )
+        if dirs_to_remove:
+            label = "directory" if len(dirs_to_remove) == 1 else "directories"
+            console.print(
+                f"[bold red]{len(dirs_to_remove)} parent {label} "
+                "will also be removed (per user choice)[/bold red]"
+            )
+        if losers_to_quarantine:
+            console.print(
+                f"[yellow]{len(losers_to_quarantine)} duplicate loser(s) will be quarantined to "
+                f"{dest / '.aside' / 'duplicates'}[/yellow]"
+            )
+
+    return plan, losers_to_delete, losers_to_quarantine, dirs_to_remove
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Aside routing — Jellyfin-aware extras placement
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def _find_anchor(file: Path, planned_moves: list[PlannedMove]) -> PlannedMove | None:
+    """Find the planned media move that an aside file 'belongs to'.
+
+    Walks ``file``'s parent directories. For each ancestor, looks for a planned
+    move whose source is also under that ancestor. The deepest such ancestor
+    that has a movie/episode planned move is the anchor — its destination's
+    parent (movie folder) or grand-parent (show folder for episodes) is where
+    the Jellyfin extras subdir goes.
+    """
+    for parent in file.parents:
+        for move in planned_moves:
+            try:
+                if move.source.is_relative_to(parent) and move.media_type in (
+                    MediaType.MOVIE,
+                    MediaType.EPISODE,
+                ):
+                    return move
+            except ValueError:
+                # is_relative_to can raise on weird paths — just skip
+                continue
+    return None
+
+
+def _anchor_dir(anchor: PlannedMove) -> Path:
+    """Where Jellyfin-recognised extras subdirs live for the anchored media.
+
+    Movies:   ``dest/Movie (Year)/`` → ``destination.parent``
+    TV shows: ``dest/Show/`` → ``destination.parent.parent``  (parent of Season)
+    """
+    if anchor.media_type == MediaType.EPISODE:
+        return anchor.destination.parent.parent
+    return anchor.destination.parent
+
+
+@dataclass
+class AsideAction:
+    """One routing decision for an aside file."""
+
+    source: Path
+    kind: AsideKind
+    action: str  # 'jellyfin_extras' | 'aside_pile' | 'discard'
+    destination: Path | None = None  # set for jellyfin_extras and aside_pile
+
+
+def _plan_aside_routing(
+    aside_files: list[tuple[Path, AsideKind]],
+    planned_moves: list[PlannedMove],
+    source: Path,
+    dest: Path,
+    remove_discards: bool,
+) -> list[AsideAction]:
+    """Decide what to do with each aside file.
+
+    Routing rules:
+      * DISCARD kind + ``remove_discards=True``  → action='discard' (unlink)
+      * DISCARD kind + ``remove_discards=False`` → action='aside_pile'
+        (moved to ``dest/.aside/``, recoverable)
+      * Other kinds with a Jellyfin extras subdir AND a parent media anchor
+        → action='jellyfin_extras', destination set to
+          ``<anchor_dir>/<jellyfin_subdir>/<filename>``
+      * Other kinds with no anchor (orphan extras) → action='aside_pile'
+    """
+    actions: list[AsideAction] = []
+    for path, kind in aside_files:
+        if kind == AsideKind.DISCARD:
+            if remove_discards:
+                actions.append(AsideAction(source=path, kind=kind, action="discard"))
+            else:
+                actions.append(
+                    AsideAction(
+                        source=path,
+                        kind=kind,
+                        action="aside_pile",
+                        destination=aside_destination(path, source, dest),
+                    )
+                )
+            continue
+
+        subdir = JELLYFIN_EXTRAS_SUBDIR.get(kind)
+        anchor = _find_anchor(path, planned_moves) if subdir else None
+        if subdir and anchor is not None:
+            target = _anchor_dir(anchor) / subdir / path.name
+            actions.append(
+                AsideAction(source=path, kind=kind, action="jellyfin_extras", destination=target)
+            )
+        else:
+            # No anchor or no Jellyfin mapping — fall back to .aside/
+            actions.append(
+                AsideAction(
+                    source=path,
+                    kind=kind,
+                    action="aside_pile",
+                    destination=aside_destination(path, source, dest),
+                )
+            )
+    return actions
+
+
+def _apply_aside_actions(
+    actions: list[AsideAction],
+    dry_run: bool,
+    logger: NullLogger,
+) -> int:
+    """Execute the planned aside actions. Returns total bytes processed."""
+    import contextlib
+
+    total_bytes = 0
+    for act in actions:
+        with contextlib.suppress(OSError):
+            total_bytes += act.source.stat().st_size if act.source.exists() else 0
+        if dry_run:
+            continue
+        try:
+            if act.action == "discard":
+                if act.source.exists():
+                    act.source.unlink()
+                    console.print(f"[red]  deleted:[/red] {act.source}")
+                    logger.warning("aside_discarded", file=act.source, kind=act.kind.value)
+            elif act.action in ("jellyfin_extras", "aside_pile"):
+                assert act.destination is not None
+                act.destination.parent.mkdir(parents=True, exist_ok=True)
+                if act.destination.exists():
+                    console.print(f"[dim]  aside target exists, skipping:[/dim] {act.destination}")
+                    continue
+                shutil.move(str(act.source), str(act.destination))
+                console.print(f"[dim]  {act.action}:[/dim] {act.source.name} → {act.destination}")
+                logger.info(
+                    f"aside_{act.action}",
+                    file=act.source,
+                    kind=act.kind.value,
+                    destination=act.destination,
+                )
+        except OSError as exc:
+            err_console.print(f"[yellow]aside failed for {act.source}: {exc}[/yellow]")
+    return total_bytes
+
+
+def _remove_empty_dirs(root: Path) -> int:
+    """Recursively remove empty directories under root (but not root itself).
+
+    Returns the number of directories actually removed.
+    """
+    removed = 0
+    for dirpath in sorted(root.rglob("*"), reverse=True):
+        if dirpath == root:
+            continue
+        if dirpath.is_dir():
+            try:
+                dirpath.rmdir()
+                console.print(f"[dim]Removed empty dir: {dirpath}[/dim]")
+                removed += 1
+            except OSError:
+                pass
+    if removed:
+        console.print(
+            f"[dim]Cleaned up {removed} empty director{'y' if removed == 1 else 'ies'}.[/dim]"
+        )
+    return removed
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# organize subcommand
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 @app.command()
@@ -236,7 +1468,14 @@ def organize(
         bool,
         typer.Option(
             "--cleanup-empty-dirs",
-            help="Remove empty source directories after moving files (only with --in-place --apply).",
+            help="Remove empty source directories after moving (only with --in-place --apply).",
+        ),
+    ] = False,
+    rich_names: Annotated[
+        bool,
+        typer.Option(
+            "--rich-names",
+            help="Include episode title, series title, and quality in the destination filename.",
         ),
     ] = False,
     cache_db: Annotated[
@@ -263,61 +1502,82 @@ def organize(
         bool,
         typer.Option(
             "--use-ai",
-            help="Enable Claude Haiku AI fallback for hard-to-parse titles (requires ANTHROPIC_API_KEY).",
+            help="Enable Claude Haiku AI fallback (requires ANTHROPIC_API_KEY).",
+        ),
+    ] = False,
+    parallel: Annotated[
+        int,
+        typer.Option(
+            "--parallel",
+            "-j",
+            help=(
+                "Number of parallel TMDB lookup workers. Default 40 — fully "
+                "saturates TMDB's 50 RPS cap even on slow-API days. Workers "
+                "share the global rate limiter, so going higher costs only a "
+                "few KB of stack per thread. Pass 1 to force sequential mode."
+            ),
+        ),
+    ] = 40,
+    full_plan: Annotated[
+        bool,
+        typer.Option(
+            "--full-plan",
+            help=(
+                "Print every row of the move/skip plan. By default the table "
+                "truncates after 50 rows so terminals stay usable on libraries "
+                "with thousands of files."
+            ),
+        ),
+    ] = False,
+    log_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--log",
+            help=(
+                "Write a structured JSON-lines log of every classification, "
+                "lookup, plan decision, dedupe action, and move to the given "
+                "file path. Append-only; safe under --parallel. Useful for "
+                "later analysis with jq, or post-mortem on a failed run."
+            ),
+        ),
+    ] = None,
+    remove_discards: Annotated[
+        bool,
+        typer.Option(
+            "--remove-discards",
+            help=(
+                "PERMANENTLY DELETE files classified as DISCARD (samples, "
+                "NCOP/NCED tracks, hash-named files, .nfo / .txt / .jpg "
+                "sidecars, RARBG promo videos). Without this flag they are "
+                "moved to dest/.aside/ instead (recoverable). Requires "
+                "--i-mean-it to actually run."
+            ),
+        ),
+    ] = False,
+    i_mean_it: Annotated[
+        bool,
+        typer.Option(
+            "--i-mean-it",
+            help=(
+                "Required confirmation alongside --remove-discards (and the "
+                "matching --remove-duplicates flag in `dedupe`). Without it, "
+                "any deletion request aborts with a big red warning."
+            ),
         ),
     ] = False,
 ) -> None:
     """Scan SOURCE, match against TMDB, and organize into DEST.
 
-    Pass --in-place to reorganize within SOURCE itself (no separate DEST needed).
-    Dry-run by default — pass --apply to move files.
-    Pass --interactive to be prompted when matches are uncertain.
-
-    Set the TMDB_API_KEY environment variable before running.
-
-    Data safety: nothing is ever deleted or overwritten.
-    Pre-flight checks run before any file is touched. On any failure the
-    operation aborts immediately with a clear message.
+    Files that would collide on the same destination are skipped silently —
+    use the ``dedupe`` subcommand to clean those up.
     """
-    # Resolve destination
-    if in_place:
-        if dest is not None:
-            err_console.print(
-                "[bold red]Error:[/bold red] Cannot combine --in-place with a DEST argument."
-            )
-            raise typer.Exit(1)
-        dest = source
-        console.print(f"[bold yellow]IN-PLACE mode — reorganizing within {source}[/bold yellow]")
-    elif dest is None:
-        err_console.print("[bold red]Error:[/bold red] DEST is required unless --in-place is used.")
+    if parallel < 1:
+        err_console.print("[bold red]Error:[/bold red] --parallel must be >= 1.")
         raise typer.Exit(1)
-
-    if cleanup_empty_dirs and not in_place:
-        err_console.print(
-            "[bold red]Error:[/bold red] --cleanup-empty-dirs only makes sense with --in-place."
-        )
-        raise typer.Exit(1)
-
+    _validate_remove_discards_flags(remove_discards, i_mean_it)
+    dest = _validate_in_place_args(in_place, dest, source, cleanup_empty_dirs)
     dry_run = not apply or dry_run_flag
-
-    # --use-ai preflight: key must exist and Haiku must respond "true"
-    if use_ai:
-        ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not ai_key:
-            err_console.print(
-                "[bold red]Error:[/bold red] --use-ai requires ANTHROPIC_API_KEY to be set."
-            )
-            raise typer.Exit(1)
-        if not quiet:
-            console.print("[dim]Checking Anthropic API key...[/dim]")
-        if not preflight_check(ai_key):
-            err_console.print(
-                "[bold red]Error:[/bold red] Anthropic API key check failed — "
-                "verify ANTHROPIC_API_KEY is valid."
-            )
-            raise typer.Exit(1)
-        if not quiet:
-            console.print("[green]✓[/green] Anthropic API key OK")
+    _ai_preflight(use_ai, quiet)
 
     if not quiet:
         if dry_run:
@@ -350,376 +1610,332 @@ def organize(
         console.print(f"Found [bold]{len(files)}[/bold] media files. Querying TMDB...\n")
         console.print(f"[dim]Cache: {cache_db}[/dim]\n")
 
-    planned_moves: list[PlannedMove] = []
-    # Pre-scan for non-video junk (nfo, jpg, sfv, txt, …) that find_media_files skips.
-    # Video junk (samples, trailers) is caught per-file in the main loop below.
-    junk_files: list[Path] = [
-        f for f in find_junk(source) if f.suffix.lower() not in VIDEO_EXTENSIONS
-    ]
-    tmdb_errors = 0
-    permission_errors = 0
-    ai_disabled = False  # set to True if user opts out mid-run after an AI error
-    ai_usage = AiUsage(0, 0)
     cache = Cache(cache_db)
+    logger = open_logger(log_path)
+    logger.info(
+        "run_started",
+        command="organize",
+        source=source,
+        dest=dest,
+        dry_run=dry_run,
+        parallel=parallel,
+        interactive=interactive,
+        use_ai=use_ai,
+        rich_names=rich_names,
+        file_count=len(files),
+    )
+    ctx = OrganizeContext(
+        source=source,
+        dest=dest,
+        tmdb=tmdb,
+        cache=cache,
+        interactive=interactive,
+        use_ai=use_ai,
+        forced_media_type=media_type,
+        rich_names=rich_names,
+        quiet=quiet,
+        force=force,
+        parallel=parallel,
+        logger=logger,
+    )
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        console=console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("Starting...", total=len(files))
+    pipeline = _run_pipeline(files, ctx)
 
-        for file in files:
-            label = file.name if len(file.name) <= 55 else file.name[:52] + "..."
-            progress.update(task, description=f"[cyan]{label}[/cyan]")
+    plan = build_plan(pipeline.planned_moves)
 
-            # Skip files already successfully moved in a previous run (unless --force)
-            if not force and cache.already_moved(file):
-                if not quiet:
-                    console.print(f"[dim]SKIP (cached):[/dim] {file.name}")
-                progress.advance(task)
-                continue
+    # Smart-route aside files into Jellyfin extras subdirs (or .aside/ / DISCARD).
+    aside_actions = _plan_aside_routing(
+        pipeline.aside_files,
+        plan.moves,
+        source,
+        dest,
+        remove_discards=remove_discards,
+    )
+    if aside_actions and not quiet:
+        action_counts: dict[str, int] = {}
+        for a in aside_actions:
+            action_counts[a.action] = action_counts.get(a.action, 0) + 1
+        parts = [f"[bold]{n}[/bold] {label}" for label, n in sorted(action_counts.items())]
+        console.print(f"\n[yellow]Aside routing:[/yellow] {', '.join(parts)}")
 
-            # Identify junk before any title parsing so junk never triggers a prompt
-            if is_junk(file):
-                if not quiet:
-                    console.print(f"[dim]JUNK:[/dim] {file.name}")
-                junk_files.append(file)
-                progress.advance(task)
-                continue
-
-            guessed = guess(file)
-
-            # Allow user to override detected type
-            if media_type != MediaType.UNKNOWN:
-                guessed.media_type = media_type
-
-            # Unknown type — skip or ask
-            if guessed.media_type == MediaType.UNKNOWN:
-                if not quiet:
-                    console.print(f"[yellow]SKIP (unknown type):[/yellow] {file.name}")
-                planned_moves.append(
-                    PlannedMove(
-                        source=file,
-                        destination=dest,
-                        media_type=MediaType.UNKNOWN,
-                        tmdb_id=None,
-                        matched_title=guessed.title or file.name,
-                        confidence="low",
-                        skipped=True,
-                        skip_reason="Could not determine media type — pass --type to force",
-                    )
-                )
-                progress.advance(task)
-                continue
-
-            # Missing title — prompt if interactive, else skip
-            if not guessed.title:
-                if interactive:
-                    progress.stop()
-                    manual = prompt_manual_title(file.name, "")
-                    progress.start()
-                    if manual:
-                        guessed.title = manual
-                    else:
-                        planned_moves.append(
-                            PlannedMove(
-                                source=file,
-                                destination=dest,
-                                media_type=guessed.media_type,
-                                tmdb_id=None,
-                                matched_title=file.name,
-                                confidence="low",
-                                skipped=True,
-                                skip_reason="User skipped — no title provided",
-                            )
-                        )
-                        progress.advance(task)
-                        continue
-                else:
-                    if not quiet:
-                        console.print(f"[yellow]SKIP (no title parsed):[/yellow] {file.name}")
-                    planned_moves.append(
-                        PlannedMove(
-                            source=file,
-                            destination=dest,
-                            media_type=guessed.media_type,
-                            tmdb_id=None,
-                            matched_title=file.name,
-                            confidence="low",
-                            skipped=True,
-                            skip_reason="guessit could not extract a title — run with --interactive",
-                        )
-                    )
-                    progress.advance(task)
-                    continue
-
-            # For TV shows the cache key always uses year=None (we never filter by year).
-            _cache_year = guessed.year if guessed.media_type == MediaType.MOVIE else None
-
-            # Check for a previously pinned interactive choice — skip TMDB entirely
-            pinned = cache.get_pinned(guessed.title, _cache_year, guessed.media_type)
-            if pinned:
-                if not quiet:
-                    console.print(
-                        f"[dim]PINNED:[/dim] {guessed.title} → {pinned.title} ({pinned.year})"
-                    )
-                planned_moves.append(plan_move(guessed, pinned, dest, file))
-                progress.advance(task)
-                continue
-
-            # TMDB lookup — SQLite cache first, then API
-            try:
-                cached = cache.get_tmdb(guessed.title, _cache_year, guessed.media_type)
-                if cached is not None:
-                    matches = cached
-                elif guessed.media_type == MediaType.MOVIE:
-                    matches = tmdb.search_movie(guessed.title, guessed.year)
-                    cache.set_tmdb(guessed.title, guessed.year, guessed.media_type, matches)
-                else:
-                    # Never pass year for TV — TMDB's first_air_date_year is the
-                    # show's premiere year, which never matches a season folder year.
-                    matches = tmdb.search_tv(guessed.title, None)
-                    cache.set_tmdb(guessed.title, None, guessed.media_type, matches)
-            except httpx.HTTPStatusError as exc:
-                progress.stop()
-                err_console.print(
-                    f"\n[bold red]TMDB error: {exc.response.status_code} "
-                    f"{exc.response.reason_phrase} — stopping.[/bold red]"
-                )
-                tmdb_errors += 1
-                break
-
-            except Exception as exc:
-                progress.stop()
-                err_console.print(f"\n[bold red]TMDB error: {exc} — stopping.[/bold red]")
-                tmdb_errors += 1
-                break
-
-            # Retry with title variants if no confident match on first search
-            search_title = guessed.title
-            if not best_match(matches, guessed.title, guessed.year):
-                for variant in _title_variants(guessed.title):
-                    try:
-                        retry = (
-                            tmdb.search_movie(variant, guessed.year)
-                            if guessed.media_type == MediaType.MOVIE
-                            else tmdb.search_tv(variant, None)
-                        )
-                        if retry and best_match(retry, variant, guessed.year):
-                            matches = retry
-                            search_title = variant
-                            cache.set_tmdb(variant, _cache_year, guessed.media_type, retry)
-                            break
-                    except Exception:
-                        pass
-
-            # AI fallback: if all variants missed, ask Haiku for a better search query
-            if use_ai and not ai_disabled and not best_match(matches, search_title, guessed.year):
-                ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
-                if ai_key:
-                    try:
-                        suggestion, call_usage = suggest_search(
-                            file.parent.name,
-                            file.name,
-                            ai_key,
-                            is_tv=guessed.media_type == MediaType.EPISODE,
-                        )
-                        ai_usage = ai_usage + call_usage
-                    except AiQueryError as exc:
-                        progress.stop()
-                        err_console.print(f"\n[bold red]Anthropic API error: {exc}[/bold red]")
-                        if interactive:
-                            disable = typer.confirm("Disable AI and continue without it?")
-                            if disable:
-                                ai_disabled = True
-                                suggestion = None
-                                progress.start()
-                            else:
-                                err_console.print("[bold red]Stopping.[/bold red]")
-                                break
-                        else:
-                            err_console.print("[bold red]Stopping.[/bold red]")
-                            break
-                    else:
-                        if suggestion:
-                            ai_title = str(suggestion.get("title", ""))
-                            ai_year_raw = suggestion.get("year")
-                            ai_year = (
-                                int(ai_year_raw) if isinstance(ai_year_raw, (int, float)) else None
-                            )
-                            if ai_title and ai_title != search_title:
-                                console.print(
-                                    f"[dim]AI query suggestion for '{guessed.title}': "
-                                    f"'{ai_title}' ({ai_year})[/dim]"
-                                )
-                                try:
-                                    ai_retry = (
-                                        tmdb.search_movie(ai_title, ai_year)
-                                        if guessed.media_type == MediaType.MOVIE
-                                        else tmdb.search_tv(ai_title, None)
-                                    )
-                                    if ai_retry:
-                                        matches = ai_retry
-                                        search_title = ai_title
-                                        cache.set_tmdb(
-                                            ai_title, _cache_year, guessed.media_type, ai_retry
-                                        )
-                                except Exception:
-                                    pass
-
-            if interactive:
-                progress.stop()
-            match = _resolve_match(
-                file, search_title, guessed.year, matches, guessed.media_type, interactive
-            )
-            if interactive:
-                progress.start()
-
-            # AniList fallback: if TMDB missed and this looks like anime, try AniList
-            if (
-                match is None
-                and guessed.media_type == MediaType.EPISODE
-                and looks_like_anime(file.name)
-            ):
-                try:
-                    al_cached = cache.get_tmdb(guessed.title, guessed.year, MediaType.EPISODE)
-                    if al_cached is None:
-                        al_matches = search_anime(guessed.title)
-                        cache.set_tmdb(guessed.title, guessed.year, MediaType.EPISODE, al_matches)
-                    else:
-                        al_matches = al_cached
-                    if al_matches:
-                        if not quiet:
-                            console.print(
-                                f"[dim]TMDB missed '{guessed.title}' — trying AniList...[/dim]"
-                            )
-                        if interactive:
-                            progress.stop()
-                        match = _resolve_match(
-                            file,
-                            guessed.title,
-                            guessed.year,
-                            al_matches,
-                            guessed.media_type,
-                            interactive,
-                        )
-                        if interactive:
-                            progress.start()
-                except Exception as exc:
-                    console.print(f"[dim]AniList fallback failed for '{file.name}': {exc}[/dim]")
-
-            if not match and not interactive and matches:
-                if not quiet:
-                    console.print(
-                        f"[yellow]SKIP (ambiguous):[/yellow] '{guessed.title}' — "
-                        f"{len(matches)} TMDB results, none matched confidently. "
-                        "Run with --interactive to pick manually."
-                    )
-                planned_moves.append(
-                    PlannedMove(
-                        source=file,
-                        destination=dest,
-                        media_type=guessed.media_type,
-                        tmdb_id=None,
-                        matched_title=guessed.title,
-                        confidence="low",
-                        skipped=True,
-                        skip_reason=f"Ambiguous: {len(matches)} results, no confident match. Use --interactive.",
-                    )
-                )
-                progress.advance(task)
-                continue
-
-            # Bare episode file (no S/E marker) — ask user to identify the episode
-            if (
-                match is not None
-                and guessed.media_type == MediaType.EPISODE
-                and guessed.episode is None
-                and interactive
-            ):
-                progress.stop()
-                try:
-                    season_num = guessed.season or 1
-                    episodes = tmdb.get_season_episodes(match.tmdb_id, season_num)
-                    if episodes:
-                        picked = prompt_episode_number(file.name, episodes)
-                        if picked is not None:
-                            guessed.episode = picked
-                except Exception as exc:
-                    console.print(f"[dim]Could not fetch episode list: {exc}[/dim]")
-                progress.start()
-
-            if interactive and match is None and not matches:
-                progress.stop()
-            planned_moves.append(plan_move(guessed, match, dest, file))
-            if interactive and match is None and not matches:
-                progress.start()
-
-            # Pin confirmed match so future runs skip the prompt.
-            # Also pin under the original guessed title when the AI or a variant
-            # rewrite found the match — otherwise the same raw title triggers
-            # another AI call on the next file.
-            if match:
-                cache.set_pinned(search_title, _cache_year, guessed.media_type, match)
-                if search_title != guessed.title:
-                    cache.set_pinned(guessed.title, _cache_year, guessed.media_type, match)
-
-            progress.advance(task)
-
-    # Junk: report + move
-    junk_bytes = sum(f.stat().st_size for f in junk_files if f.exists())
-    if junk_files:
-        report_junk(junk_files, source, dest, dry_run)
-        if not dry_run:
-            moved_junk, failed_junk = move_junk(junk_files, source, dest)
-            if failed_junk:
-                err_console.print(
-                    f"[yellow]{failed_junk} junk file(s) could not be moved.[/yellow]"
-                )
-
-    plan = build_plan(planned_moves)
+    # `organize` skips duplicates silently — the user runs `dedupe` to clean them up.
+    duplicate_groups = find_duplicate_groups(plan.moves)
+    if duplicate_groups and not quiet:
+        console.print(
+            f"\n[yellow]{len(duplicate_groups)} duplicate destination group(s) detected — "
+            "skipping both files in each pair. Use 'jellyfiler dedupe' to resolve.[/yellow]"
+        )
+    if duplicate_groups:
+        logger.warning(
+            "duplicate_groups_detected",
+            group_count=len(duplicate_groups),
+            action="skipped",
+        )
+        plan, _del, _quar, _dirs = _resolve_dedupe(
+            plan,
+            interactive=False,  # force skip-both behavior in organize
+            quarantine_duplicates=False,
+            remove_duplicates=False,
+            quiet=quiet,
+            dest=dest,
+        )
 
     try:
-        execute(plan, dry_run=dry_run, cache=cache, source_root=source)
+        execute(
+            plan,
+            dry_run=dry_run,
+            cache=cache,
+            source_root=source,
+            full_plan=full_plan,
+        )
     except ExecutionError as exc:
         err_console.print(f"\n[bold red]{exc}[/bold red]")
+        logger.error("execute_failed", error=str(exc))
+        logger.close()
         raise typer.Exit(1) from exc
 
-    # Empty-dir cleanup or simulation (in-place only)
-    empty_dirs_count = 0
+    aside_bytes = _apply_aside_actions(aside_actions, dry_run, logger)
+
+    # --cleanup-empty-dirs reporting:
+    #   dry-run → simulate the count so the summary tells the user what would happen
+    #   apply   → run the real rmdir pass and report the actual count
+    empty_dirs = 0
+    empty_dirs_simulated = False
     if in_place and cleanup_empty_dirs:
         if dry_run:
-            from jellyfiler.executor import _subtitle_companions
-
-            files_leaving = {m.source for m in plan.moves} | set(junk_files)
-            # Subtitle sidecars are moved by the executor but not tracked in plan.moves;
-            # include them so the simulation doesn't think their release folder is still occupied.
-            for move in plan.moves:
-                files_leaving.update(_subtitle_companions(move.source))
-            empty_dirs_count, sim_perm_errors = _simulate_empty_dirs(source, files_leaving)
-            permission_errors += sim_perm_errors
-        else:
-            empty_dirs_count = _remove_empty_dirs(source)
+            files_leaving = {m.source for m in plan.moves} | {a.source for a in aside_actions}
+            empty_dirs, perm_errors = _simulate_empty_dirs(source, files_leaving)
+            empty_dirs_simulated = True
+            if perm_errors:
+                console.print(
+                    f"[dim]({perm_errors} dir(s) unreadable — counted as non-empty)[/dim]"
+                )
+        elif apply:
+            empty_dirs = _remove_empty_dirs(source)
 
     _print_summary(
         planned=len(plan.moves),
         skipped=len(plan.skipped),
-        junk_count=len(junk_files),
-        junk_bytes=junk_bytes,
-        tmdb_errors=tmdb_errors,
+        junk_count=len(aside_actions),
+        junk_bytes=aside_bytes,
+        tmdb_errors=pipeline.tmdb_errors,
         dry_run=dry_run,
-        empty_dirs=empty_dirs_count,
-        permission_errors=permission_errors,
-        ai_usage=ai_usage if use_ai else None,
+        empty_dirs=empty_dirs,
+        empty_dirs_simulated=empty_dirs_simulated,
+    )
+    logger.info(
+        "run_finished",
+        command="organize",
+        planned=len(plan.moves),
+        skipped=len(plan.skipped),
+        aside_count=len(aside_actions),
+        aside_bytes=aside_bytes,
+        tmdb_errors=pipeline.tmdb_errors,
+        empty_dirs=empty_dirs,
+        empty_dirs_simulated=empty_dirs_simulated,
+        dry_run=dry_run,
+    )
+    logger.close()
+
+    if pipeline.tmdb_errors:
+        err_console.print(
+            f"\n[yellow]{pipeline.tmdb_errors} TMDB error(s) occurred — see above.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# dedupe subcommand
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@app.command()
+def dedupe(
+    source: Annotated[Path, typer.Argument(help="Source directory containing media files")],
+    dest: Annotated[
+        Path,
+        typer.Argument(help="Destination root — used to compute would-be paths for grouping."),
+    ],
+    interactive: Annotated[
+        bool,
+        typer.Option(
+            "--interactive/--no-interactive",
+            help="Prompt per duplicate group (default: on). Off + no flag = skip both.",
+        ),
+    ] = True,
+    quarantine_duplicates: Annotated[
+        bool,
+        typer.Option(
+            "--quarantine-duplicates",
+            help="Auto-keep highest quality, move losers to dest/.aside/duplicates/ (recoverable).",
+        ),
+    ] = False,
+    remove_duplicates: Annotated[
+        bool,
+        typer.Option(
+            "--remove-duplicates",
+            help="Auto-keep highest quality, PERMANENTLY DELETE losers. Requires --i-mean-it.",
+        ),
+    ] = False,
+    i_mean_it: Annotated[
+        bool,
+        typer.Option(
+            "--i-mean-it",
+            help="Required confirmation alongside --remove-duplicates. Without this, aborts.",
+        ),
+    ] = False,
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Actually act on duplicates. Without this, dry-run only."),
+    ] = False,
+    cache_db: Annotated[
+        Path, typer.Option("--cache-db", help="Path to the SQLite cache database.")
+    ] = _DEFAULT_DB,
+    quiet: Annotated[
+        bool, typer.Option("--quiet", "-q", help="Suppress per-file output; show summary only.")
+    ] = False,
+    parallel: Annotated[
+        int,
+        typer.Option(
+            "--parallel",
+            "-j",
+            help=(
+                "Number of parallel TMDB lookup workers. Default 40 — saturates "
+                "TMDB's rate cap even on slow-API days. Pass 1 to force sequential."
+            ),
+        ),
+    ] = 40,
+    full_plan: Annotated[
+        bool,
+        typer.Option(
+            "--full-plan",
+            help="Print every row of the move/skip plan (default truncates at 50).",
+        ),
+    ] = False,
+    log_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--log",
+            help="Write a JSON-lines event log to the given path (matching, dedupe, deletions).",
+        ),
+    ] = None,
+) -> None:
+    """Find and resolve duplicate-destination files in SOURCE.
+
+    Two source files matching the same TMDB show/episode would land at the same
+    DEST path. This command finds those groups and applies a resolution
+    (interactive prompt, quarantine, or delete). Winning copies stay in SOURCE
+    untouched — use ``organize`` afterwards to move them to DEST.
+    """
+    if parallel < 1:
+        err_console.print("[bold red]Error:[/bold red] --parallel must be >= 1.")
+        raise typer.Exit(1)
+    _validate_dedupe_flags(remove_duplicates, i_mean_it, quarantine_duplicates)
+    dry_run = not apply
+
+    tmdb = _get_tmdb_client()
+
+    if not quiet:
+        console.print(f"\nScanning [cyan]{source}[/cyan]...")
+    try:
+        files = find_media_files(source)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1) from exc
+
+    if not files:
+        console.print("[yellow]No media files found.[/yellow]")
+        raise typer.Exit(0)
+
+    cache = Cache(cache_db)
+    logger = open_logger(log_path)
+    logger.info(
+        "run_started",
+        command="dedupe",
+        source=source,
+        dest=dest,
+        dry_run=dry_run,
+        parallel=parallel,
+        interactive=interactive,
+        quarantine_duplicates=quarantine_duplicates,
+        remove_duplicates=remove_duplicates,
+        file_count=len(files),
+    )
+    ctx = OrganizeContext(
+        source=source,
+        dest=dest,
+        tmdb=tmdb,
+        cache=cache,
+        interactive=interactive,
+        use_ai=False,
+        forced_media_type=MediaType.UNKNOWN,
+        rich_names=False,
+        quiet=quiet,
+        force=True,  # in dedupe we don't skip already-moved files (we want to find dupes)
+        parallel=parallel,
+        logger=logger,
     )
 
-    if tmdb_errors:
-        err_console.print(f"\n[yellow]{tmdb_errors} TMDB error(s) occurred — see above.[/yellow]")
-        raise typer.Exit(1)
+    pipeline = _run_pipeline(files, ctx)
+    plan = build_plan(pipeline.planned_moves)
+
+    plan, losers_to_delete, losers_to_quarantine, dirs_to_remove = _resolve_dedupe(
+        plan,
+        interactive=interactive,
+        quarantine_duplicates=quarantine_duplicates,
+        remove_duplicates=remove_duplicates,
+        quiet=quiet,
+        dest=dest,
+    )
+
+    if not (losers_to_delete or losers_to_quarantine):
+        if not quiet:
+            console.print("[green]No duplicates to resolve.[/green]")
+        logger.info("dedupe_no_duplicates")
+        logger.close()
+        raise typer.Exit(0)
+
+    if dry_run:
+        console.print(
+            f"\n[bold cyan]DRY RUN[/bold cyan] — pass --apply to actually delete/quarantine. "
+            f"Would resolve {len(losers_to_delete) + len(losers_to_quarantine)} loser(s)."
+        )
+        logger.info(
+            "dedupe_planned",
+            to_delete=len(losers_to_delete),
+            to_quarantine=len(losers_to_quarantine),
+            dirs_to_remove=len(dirs_to_remove),
+            dry_run=True,
+        )
+        logger.close()
+        raise typer.Exit(0)
+
+    for loser in losers_to_delete:
+        logger.warning("dedupe_will_delete", file=loser.source)
+    for loser in losers_to_quarantine:
+        logger.info("dedupe_will_quarantine", file=loser.source)
+    for d in dirs_to_remove:
+        logger.warning("dedupe_will_rmtree", path=d)
+
+    _apply_dedupe_actions(losers_to_delete, losers_to_quarantine, dirs_to_remove, source, dest)
+    if not quiet:
+        console.print(
+            f"\n[bold green]Done.[/bold green] "
+            f"Resolved {len(losers_to_delete) + len(losers_to_quarantine)} duplicate(s)."
+        )
+    logger.info(
+        "run_finished",
+        command="dedupe",
+        deleted=len(losers_to_delete),
+        quarantined=len(losers_to_quarantine),
+        dirs_removed=len(dirs_to_remove),
+    )
+    logger.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# scan subcommand
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 @app.command()
@@ -764,7 +1980,9 @@ def scan(
     console.print(table)
 
 
-# ── Cache subcommands ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# Cache subcommands
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 @cache_app.command("stats")
@@ -823,19 +2041,3 @@ def cache_clear(
     cache.close()
     for table, count in deleted.items():
         console.print(f"  [green]✓[/green] {table}: deleted [bold]{count}[/bold] rows")
-
-
-def _remove_empty_dirs(root: Path) -> int:
-    """Recursively remove empty directories under root (but not root itself). Returns count removed."""
-    removed = 0
-    for dirpath in sorted(root.rglob("*"), reverse=True):
-        if dirpath == root:
-            continue
-        if dirpath.is_dir():
-            try:
-                dirpath.rmdir()
-                console.print(f"[dim]Removed empty dir: {dirpath}[/dim]")
-                removed += 1
-            except OSError:
-                pass
-    return removed

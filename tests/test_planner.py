@@ -2,10 +2,13 @@
 
 from pathlib import Path
 
+import pytest
+
 from jellyfiler.models import GuessedMedia, MediaType, Plan, PlannedMove, TmdbMatch
 from jellyfiler.planner import (
     _episode_destination,
     _movie_destination,
+    _quality_tag,
     _safe_name,
     build_plan,
     plan_move,
@@ -77,6 +80,20 @@ def test_episode_destination_multi_episode_three():
     )
     dest = _episode_destination(Path("/dest"), match, guessed, Path("Show.S03E01E02E03.mkv"))
     assert dest == Path("/dest/Futurama/Season 03/S03E01-E03.mkv")
+
+
+def test_episode_destination_raises_when_episode_is_none():
+    """Defensive: callers must resolve episode before calling _episode_destination directly."""
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("orphan.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=1,
+        episode=None,
+    )
+    with pytest.raises(ValueError, match="episode number is unknown"):
+        _episode_destination(Path("/dest"), match, guessed, Path("orphan.mkv"))
 
 
 def test_episode_destination_pads_single_digit():
@@ -169,6 +186,124 @@ def test_plan_move_unknown_type_is_skipped():
 
 
 # ---------------------------------------------------------------------------
+# rich_names
+# ---------------------------------------------------------------------------
+
+
+def test_rich_names_episode_all_fields():
+    """S01E01-Episode Title-Show Name-720p.mkv when all fields present."""
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S01E01.720p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=1,
+        episode=1,
+        episode_title="Space Pilot 3000",
+        raw_guess={"screen_size": "720p"},
+    )
+    dest = _episode_destination(
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), rich_names=True
+    )
+    assert dest == Path("/dest/Futurama/Season 01/S01E01-Space Pilot 3000-Futurama-720p.mkv")
+
+
+def test_rich_names_episode_no_episode_title():
+    """S01E01-Show Name-720p.mkv when episode title is absent."""
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S01E01.720p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=1,
+        episode=1,
+        episode_title=None,
+        raw_guess={"screen_size": "720p"},
+    )
+    dest = _episode_destination(
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), rich_names=True
+    )
+    assert dest == Path("/dest/Futurama/Season 01/S01E01-Futurama-720p.mkv")
+
+
+def test_rich_names_episode_no_quality():
+    """S01E01-Episode Title-Show Name.mkv when no screen_size in raw_guess."""
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S01E01.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=1,
+        episode=1,
+        episode_title="Space Pilot 3000",
+        raw_guess={},
+    )
+    dest = _episode_destination(
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.mkv"), rich_names=True
+    )
+    assert dest == Path("/dest/Futurama/Season 01/S01E01-Space Pilot 3000-Futurama.mkv")
+
+
+def test_rich_names_false_gives_plain_code():
+    """Default (rich_names=False) still produces plain S01E01.mkv."""
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S01E01.720p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=1,
+        episode=1,
+        episode_title="Space Pilot 3000",
+        raw_guess={"screen_size": "720p"},
+    )
+    dest = _episode_destination(
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), rich_names=False
+    )
+    assert dest == Path("/dest/Futurama/Season 01/S01E01.mkv")
+
+
+def test_quality_tag_present():
+    guessed = GuessedMedia(
+        source_path=Path("x.mkv"),
+        media_type=MediaType.EPISODE,
+        title="X",
+        raw_guess={"screen_size": "1080p"},
+    )
+    assert _quality_tag(guessed) == "1080p"
+
+
+def test_quality_tag_absent():
+    guessed = GuessedMedia(
+        source_path=Path("x.mkv"),
+        media_type=MediaType.EPISODE,
+        title="X",
+        raw_guess={},
+    )
+    assert _quality_tag(guessed) == ""
+
+
+def test_plan_move_rich_names_episode():
+    """plan_move passes rich_names=True through to the destination."""
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S12E03.720p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=12,
+        episode=3,
+        episode_title="Bendless Love",
+        raw_guess={"screen_size": "720p"},
+    )
+    match = TmdbMatch(tmdb_id=2, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    result = plan_move(
+        guessed, match, Path("/dest"), Path("Futurama.S12E03.720p.mkv"), rich_names=True
+    )
+    assert not result.skipped
+    assert result.destination == Path(
+        "/dest/Futurama/Season 12/S12E03-Bendless Love-Futurama-720p.mkv"
+    )
+
+
+# ---------------------------------------------------------------------------
 # build_plan
 # ---------------------------------------------------------------------------
 
@@ -208,26 +343,6 @@ def test_build_plan_splits_moves_and_skipped():
     plan = build_plan(moves + skips)
     assert len(plan.moves) == 2
     assert len(plan.skipped) == 1
-
-
-def test_build_plan_deduplicates_by_keeping_largest(tmp_path: Path) -> None:
-    """When two files map to the same destination, keep the larger one, skip the smaller."""
-    large = tmp_path / "movie_hd.mkv"
-    small = tmp_path / "movie_sd.mkv"
-    large.write_bytes(b"x" * 1000)
-    small.write_bytes(b"x" * 100)
-    dest = Path("Movie (2020)/Movie (2020).mkv")
-
-    moves = [
-        _planned_move_to(str(large), str(dest)),
-        _planned_move_to(str(small), str(dest)),
-    ]
-    plan = build_plan(moves)
-    assert len(plan.moves) == 1
-    assert plan.moves[0].source == large
-    assert len(plan.skipped) == 1
-    assert plan.skipped[0].source == small
-    assert "Duplicate destination" in plan.skipped[0].skip_reason
 
 
 def test_build_plan_empty():

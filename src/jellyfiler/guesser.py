@@ -14,6 +14,13 @@ _LEADING_PREFIX = re.compile(r"^[b-df-hj-np-tv-z]\.? (?=[A-Z])")
 _QUALITY_RESIDUE = re.compile(r"\s+\d{3,4}[bBpP][dD]?\b.*$")
 # Leading episode number with no separator: "003isthislove" → episode=3, stem="isthislove"
 _BARE_EPISODE_PREFIX = re.compile(r"^(\d{2,4})\D")
+# Hey-Arnold-style split-episode marker: "S01E01a" / "S01E01b" → strip 'a/b' so guessit parses,
+# capture the letter so the destination filename keeps the two halves distinct.
+_SEGMENT_LETTER = re.compile(r"(?i)(S\d+E\d+)([a-c])(?=\b|[\s._-])")
+# Year ranges in folder names mean "season aired from X to Y", not "show premiered in X".
+# Examples: "Season 1 (1994-95)", "AVATAR (2005-2014)", "Book 3 - Fire (2007-08)".
+# When a parent-dir name has one of these, we suppress year fallback from that dir.
+_YEAR_RANGE = re.compile(r"\(\s*\d{4}\s*[-–]\s*\d{2,4}\s*\)")
 
 
 def _clean_title(title: str) -> str:
@@ -30,6 +37,21 @@ def _parse_name(name: str) -> dict[str, object]:
     return dict(guessit.guessit(name))
 
 
+def _is_ova(result: dict[str, object]) -> bool:
+    """True when guessit flagged the name as an OVA / OAD / ONA.
+
+    guessit puts 'Original Animated Video' in the 'other' field whenever it sees
+    OVA, OVAs, OAD, ONA tokens in the release name. We use that as the signal
+    to route the file to Jellyfin's Season 00 (Specials).
+    """
+    other = result.get("other")
+    if isinstance(other, str):
+        return "Original Animated Video" in other
+    if isinstance(other, list):
+        return any("Original Animated Video" in str(o) for o in other)
+    return False
+
+
 def _extract(
     result: dict[str, object],
 ) -> tuple[MediaType, str, int | None, int | None, int | None, int | None]:
@@ -44,6 +66,18 @@ def _extract(
     title = result.get("title", "")
     if isinstance(title, list):
         title = title[0]
+
+    # Dash-separated movie subtitles ("The Punisher - War Zone") get split by
+    # guessit into title + alternative_title. Combine them as "Title: Subtitle"
+    # so TMDB search finds the full canonical name (e.g. "Punisher: War Zone").
+    # TV folder names also produce alternative_title in guessit but it's usually
+    # numbered-prefix noise like "08 Series - The Last Airbender", so skip there.
+    alt_title = result.get("alternative_title", "")
+    if isinstance(alt_title, list):
+        alt_title = alt_title[0] if alt_title else ""
+    if title and alt_title and raw_type == "movie":
+        title = f"{title}: {alt_title}"
+
     title = _clean_title(str(title)) if title else ""
 
     year = result.get("year")
@@ -71,6 +105,17 @@ def _extract(
     return media_type, title, year, season, episode, episode_end
 
 
+def _strip_segment_letter(name: str) -> tuple[str, str | None]:
+    """Strip a single-letter split-episode marker so guessit can parse SxxExx.
+
+    Returns (stripped_name, letter or None). 'S01E01a Title.mkv' → ('S01E01 Title.mkv', 'a').
+    """
+    m = _SEGMENT_LETTER.search(name)
+    if not m:
+        return name, None
+    return name[: m.start(2)] + name[m.end(2) :], m.group(2).lower()
+
+
 def guess(path: Path) -> GuessedMedia:
     """Parse a filename (and its parent directory name) into structured media metadata.
 
@@ -78,8 +123,12 @@ def guess(path: Path) -> GuessedMedia:
     are filled in from the parent directory name, which often carries the show
     title and season pack info that individual episode files omit.
     """
-    file_result = _parse_name(path.name)
+    # Pre-process: split-episode letter markers (S01E01a/b) confuse guessit.
+    preprocessed_name, segment = _strip_segment_letter(path.name)
+    file_result = _parse_name(preprocessed_name)
     media_type, title, year, season, episode, episode_end = _extract(file_result)
+
+    dir_result: dict[str, object] = {}
 
     # Fill gaps using the parent directory name — release groups often put the
     # show title / season / year there even when individual filenames are bare.
@@ -88,11 +137,17 @@ def guess(path: Path) -> GuessedMedia:
         dir_result = _parse_name(parent_name)
         _, dir_title, dir_year, dir_season, _, _ = _extract(dir_result)
 
+        # Year ranges in parent names ("Season 1 (1994-95)") give a season-aired
+        # year, not the show's premiere year — drop the year so it doesn't leak.
+        if _YEAR_RANGE.search(parent_name):
+            dir_year = None
+
         if not title and dir_title:
             title = dir_title
         if not year and dir_year:
             year = dir_year
-        if not season and dir_season:
+        # Use `is None` so an explicit season=0 (S00E01) isn't replaced.
+        if season is None and dir_season is not None:
             season = dir_season
         # Prefer file-level media type; fall back to dir if unknown
         if media_type == MediaType.UNKNOWN and dir_result.get("type") != "unknown":
@@ -120,6 +175,16 @@ def guess(path: Path) -> GuessedMedia:
                     media_type = MediaType.EPISODE
                     break
 
+    # OVA / OAD / ONA → Season 00 (Jellyfin's Specials convention).
+    # Run AFTER parent-dir fallback so an OVA in a "Season 02 + Ovas/" folder
+    # still routes to S00 instead of being captured by the season-2 folder.
+    # Check filename + immediate parent (already parsed); avoids re-parsing.
+    if _is_ova(file_result) or _is_ova(dir_result):
+        # OVAs belong in the TV library even when guessit guessed "movie"
+        # (e.g. Black.Lagoon.OVA.1080p... has no SxxExx and falls to movie type).
+        media_type = MediaType.EPISODE
+        season = 0
+
     # Bare numeric episode prefix with no separator: "003isthislove" → episode=3
     # guessit treats these as movie titles when there is no space/dot/dash before the letters.
     if episode is None and media_type == MediaType.EPISODE:
@@ -138,5 +203,6 @@ def guess(path: Path) -> GuessedMedia:
         episode_title=str(file_result["episode_title"])
         if file_result.get("episode_title")
         else None,
+        segment=segment,
         raw_guess=file_result,
     )

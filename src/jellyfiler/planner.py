@@ -18,25 +18,49 @@ def _movie_destination(dest_root: Path, match: TmdbMatch, source: Path) -> Path:
     return dest_root / folder_name / f"{folder_name}{source.suffix.lower()}"
 
 
+def _quality_tag(guessed: GuessedMedia) -> str:
+    """Extract quality string from raw guessit output (e.g. '720p', '1080p')."""
+    size = guessed.raw_guess.get("screen_size")
+    return str(size) if size else ""
+
+
 def _episode_destination(
     dest_root: Path,
     match: TmdbMatch,
     guessed: GuessedMedia,
     source: Path,
+    rich_names: bool = False,
 ) -> Path:
-    """Jellyfin episode convention: Show Name/Season XX/S01E01.ext"""
+    """Jellyfin episode convention: Show Name/Season XX/S01E01.ext
+
+    With rich_names=True: S01E01-Episode Title-Show Name-720p.ext
+    """
     show_name = _safe_name(match.title)
     season = guessed.season or 1
     episode = guessed.episode  # intentionally not defaulted — callers must resolve first
     if episode is None:
         raise ValueError(f"episode number is unknown for '{source.name}'")
     season_folder = f"Season {season:02d}"
+    ext = source.suffix.lower()
+
+    seg = guessed.segment or ""
     if guessed.episode_end is not None and guessed.episode_end != episode:
-        episode_file = (
-            f"S{season:02d}E{episode:02d}-E{guessed.episode_end:02d}{source.suffix.lower()}"
-        )
+        base_code = f"S{season:02d}E{episode:02d}-E{guessed.episode_end:02d}"
     else:
-        episode_file = f"S{season:02d}E{episode:02d}{source.suffix.lower()}"
+        base_code = f"S{season:02d}E{episode:02d}{seg}"
+
+    if rich_names:
+        parts = [base_code]
+        if guessed.episode_title:
+            parts.append(_safe_name(guessed.episode_title))
+        parts.append(show_name)
+        quality = _quality_tag(guessed)
+        if quality:
+            parts.append(quality)
+        episode_file = "-".join(parts) + ext
+    else:
+        episode_file = base_code + ext
+
     return dest_root / show_name / season_folder / episode_file
 
 
@@ -45,6 +69,7 @@ def plan_move(
     match: TmdbMatch | None,
     dest_root: Path,
     source: Path,
+    rich_names: bool = False,
 ) -> PlannedMove:
     if not match:
         return PlannedMove(
@@ -75,7 +100,7 @@ def plan_move(
                     "run with --interactive to pick manually"
                 ),
             )
-        destination = _episode_destination(dest_root, match, guessed, source)
+        destination = _episode_destination(dest_root, match, guessed, source, rich_names)
     else:
         return PlannedMove(
             source=source,
@@ -124,45 +149,9 @@ def plan_move(
 
 def build_plan(planned_moves: list[PlannedMove]) -> Plan:
     plan = Plan()
-
-    # Group non-skipped moves by destination to detect duplicates.
-    # When multiple source files resolve to the same destination (e.g. different language
-    # dubs, multiple quality versions all matched to the same TMDB entry), keep the
-    # largest file and skip the rest rather than aborting the entire run.
-    dest_to_moves: dict[Path, list[PlannedMove]] = {}
     for move in planned_moves:
         if move.skipped:
             plan.skipped.append(move)
         else:
-            dest_to_moves.setdefault(move.destination, []).append(move)
-
-    for dest, moves in dest_to_moves.items():
-        if len(moves) == 1:
-            plan.moves.append(moves[0])
-        else:
-            # Keep the largest file; skip the rest.
-            winner = max(
-                moves,
-                key=lambda m: m.source.stat().st_size if m.source.exists() else 0,
-            )
-            plan.moves.append(winner)
-            for loser in moves:
-                if loser is winner:
-                    continue
-                plan.skipped.append(
-                    PlannedMove(
-                        source=loser.source,
-                        destination=dest,
-                        media_type=loser.media_type,
-                        tmdb_id=loser.tmdb_id,
-                        matched_title=loser.matched_title,
-                        confidence=loser.confidence,
-                        skipped=True,
-                        skip_reason=(
-                            f"Duplicate destination — keeping larger file "
-                            f"'{winner.source.name}' for this destination"
-                        ),
-                    )
-                )
-
+            plan.moves.append(move)
     return plan

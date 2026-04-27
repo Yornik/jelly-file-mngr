@@ -164,3 +164,35 @@ def test_well_named_episode_not_overridden_by_grandparent(tmp_path: Path) -> Non
     g = guess(f)
     # Futurama comes from the filename; "Some Other Folder" must not win
     assert g.title == "Futurama"
+
+
+def test_episode_single_element_list():
+    """guessit may return episode as a 1-element list — should produce a scalar episode, no episode_end."""
+    with patch(
+        "jellyfiler.guesser.guessit.guessit",
+        return_value={"type": "episode", "title": "Show", "season": 1, "episode": [7]},
+    ):
+        g = guess(Path("X.mkv"))
+    assert g.episode == 7
+    assert g.episode_end is None
+
+
+def test_media_type_falls_back_to_parent_dir_movie():
+    """Filename gives unknown type, parent dir guessit recognises it as a movie."""
+    # A path with no S/E or year, parent dir is a clear movie folder
+    p = Path("Blade.Runner.2049.2017.2160p.BluRay") / "video.mkv"
+    g = guess(p)
+    assert g.media_type == MediaType.MOVIE
+
+
+def test_media_type_falls_back_to_parent_dir_episode():
+    """Filename gives unknown type, parent dir is a clear season pack."""
+    with patch(
+        "jellyfiler.guesser.guessit.guessit",
+        side_effect=[
+            {"type": "other"},  # filename guess: unknown
+            {"type": "episode", "title": "Show", "season": 3},  # parent dir guess: episode
+        ],
+    ):
+        g = guess(Path("Show.S03") / "video.mkv")
+    assert g.media_type == MediaType.EPISODE

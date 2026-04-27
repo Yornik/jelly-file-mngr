@@ -39,23 +39,35 @@ class ExecutionError(Exception):
 
 
 def _subtitle_companions(source: Path) -> list[Path]:
-    """Return subtitle files in the same directory that share source's stem.
+    """Return subtitle files that share source's stem.
+
+    Searches the source's own directory plus any immediate subdirectories
+    (e.g. Subs/, Subtitles/, English/) to handle the common torrent pattern
+    where subtitle files are packed in a sub-folder next to the video.
 
     Matches exact stem (``episode.srt``) and stem-plus-lang-code (``episode.en.srt``).
     """
     stem = source.stem
     companions = []
-    for candidate in source.parent.iterdir():
-        if candidate.suffix.lower() not in SUBTITLE_EXTENSIONS:
-            continue
-        # exact match: episode.srt
-        if candidate.stem == stem:
-            companions.append(candidate)
-            continue
-        # lang-code match: episode.en.srt → inner_stem="episode", lang="en"
-        inner = Path(candidate.stem)
-        if inner.stem == stem and _LANG_CODE.match(inner.suffix.lstrip(".")):
-            companions.append(candidate)
+
+    search_dirs = [source.parent] + [
+        d for d in source.parent.iterdir() if d.is_dir() and d != source.parent
+    ]
+
+    for search_dir in search_dirs:
+        for candidate in search_dir.iterdir():
+            if not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in SUBTITLE_EXTENSIONS:
+                continue
+            # exact match: episode.srt
+            if candidate.stem == stem:
+                companions.append(candidate)
+                continue
+            # lang-code match: episode.en.srt → inner_stem="episode", lang="en"
+            inner = Path(candidate.stem)
+            if inner.stem == stem and _LANG_CODE.match(inner.suffix.lstrip(".")):
+                companions.append(candidate)
     return companions
 
 
@@ -100,6 +112,7 @@ def execute(
     dry_run: bool = True,
     cache: "Cache | None" = None,
     source_root: Path | None = None,
+    full_plan: bool = False,
 ) -> None:
     """Execute the plan.
 
@@ -107,9 +120,19 @@ def execute(
     Pass dry_run=False to actually move files.
 
     Aborts before touching anything if any pre-flight check fails.
+
+    When ``full_plan=False`` (default), the plan table truncates large move/skip
+    lists to keep terminal output usable on libraries with thousands of files.
+    Pass ``full_plan=True`` (CLI: ``--full-plan``) to dump the lot.
     """
+    # Even when there's nothing to MOVE, the user still cares about the
+    # skipped list ("why didn't anything happen?") — print it before returning.
+    if not plan.moves and not plan.skipped:
+        console.print("[yellow]Nothing to do — no media files to plan or skip.[/yellow]")
+        return
     if not plan.moves:
         console.print("[yellow]Nothing to move.[/yellow]")
+        _print_plan(plan, source_root, full_plan=full_plan)
         return
 
     if dry_run:
@@ -117,8 +140,7 @@ def execute(
     else:
         console.print("\n[bold red]LIVE RUN — files will be moved[/bold red]\n")
 
-    # Always show the full plan
-    _print_plan(plan, source_root)
+    _print_plan(plan, source_root, full_plan=full_plan)
 
     if dry_run:
         console.print(
@@ -186,30 +208,57 @@ def _short_dest(dest: Path, source_root: Path | None) -> str:
     return dest.name
 
 
-def _print_plan(plan: Plan, source_root: Path | None = None) -> None:
-    table = Table(title="Move plan", show_lines=False, expand=False)
-    table.add_column("", width=2, no_wrap=True)
-    table.add_column("Source file", style="cyan", no_wrap=False, max_width=40)
-    table.add_column("Destination", style="green", no_wrap=False, max_width=50)
-    table.add_column("TMDB match", style="white", max_width=30)
-    table.add_column("Conf", style="dim", width=5, no_wrap=True)
+_PLAN_ROW_LIMIT = 50  # keep the terminal usable on big libraries
 
-    for move in plan.moves:
-        icon = _TYPE_ICON.get(move.media_type, "?")
-        conf_style = (
-            "[bold green]high[/bold green]" if move.confidence == "high" else "[yellow]low[/yellow]"
-        )
-        table.add_row(
-            icon,
-            move.source.name,
-            _short_dest(move.destination, source_root),
-            move.matched_title,
-            conf_style,
-        )
 
-    console.print(table)
+def _print_plan(
+    plan: Plan,
+    source_root: Path | None = None,
+    *,
+    full_plan: bool = False,
+) -> None:
+    """Render the move/skip plan, truncating each section to keep output sane.
+
+    Pass ``full_plan=True`` to dump every row. Without it, sections longer than
+    ``_PLAN_ROW_LIMIT`` are clipped with a ``... and N more`` footer line.
+    """
+    if plan.moves:
+        table = Table(title="Move plan", show_lines=False, expand=False)
+        table.add_column("", width=2, no_wrap=True)
+        table.add_column("Source file", style="cyan", no_wrap=False, max_width=40)
+        table.add_column("Destination", style="green", no_wrap=False, max_width=50)
+        table.add_column("TMDB match", style="white", max_width=30)
+        table.add_column("Conf", style="dim", width=5, no_wrap=True)
+
+        rows = plan.moves if full_plan else plan.moves[:_PLAN_ROW_LIMIT]
+        for move in rows:
+            icon = _TYPE_ICON.get(move.media_type, "?")
+            conf_style = (
+                "[bold green]high[/bold green]"
+                if move.confidence == "high"
+                else "[yellow]low[/yellow]"
+            )
+            table.add_row(
+                icon,
+                move.source.name,
+                _short_dest(move.destination, source_root),
+                move.matched_title,
+                conf_style,
+            )
+        console.print(table)
+        hidden = len(plan.moves) - len(rows)
+        if hidden:
+            console.print(
+                f"[dim]  … and {hidden} more move(s) not shown — pass --full-plan to see them.[/dim]"
+            )
 
     if plan.skipped:
         console.print(f"\n[yellow]Skipped ({len(plan.skipped)}):[/yellow]")
-        for skip in plan.skipped:
+        rows_skipped = plan.skipped if full_plan else plan.skipped[:_PLAN_ROW_LIMIT]
+        for skip in rows_skipped:
             console.print(f"  [yellow]⚠[/yellow] {skip.source.name} — {skip.skip_reason}")
+        hidden_skipped = len(plan.skipped) - len(rows_skipped)
+        if hidden_skipped:
+            console.print(
+                f"[dim]  … and {hidden_skipped} more skipped — pass --full-plan to see them.[/dim]"
+            )
