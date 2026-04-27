@@ -40,7 +40,7 @@ def _ctx(
     forced: MediaType = MediaType.UNKNOWN,
     quiet: bool = True,
     force: bool = False,
-    rich_names: bool = False,
+    fancy_title: bool = False,
 ) -> OrganizeContext:
     src = tmp_path / "src"
     dst = tmp_path / "dst"
@@ -58,7 +58,7 @@ def _ctx(
         interactive=interactive,
         use_ai=use_ai,
         forced_media_type=forced,
-        rich_names=rich_names,
+        fancy_title=fancy_title,
         quiet=quiet,
         force=force,
     )

@@ -186,11 +186,11 @@ def test_plan_move_unknown_type_is_skipped():
 
 
 # ---------------------------------------------------------------------------
-# rich_names
+# fancy_title
 # ---------------------------------------------------------------------------
 
 
-def test_rich_names_episode_all_fields():
+def test_fancy_title_episode_all_fields():
     """S01E01-Episode Title-Show Name-720p.mkv when all fields present."""
     match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
     guessed = GuessedMedia(
@@ -203,12 +203,12 @@ def test_rich_names_episode_all_fields():
         raw_guess={"screen_size": "720p"},
     )
     dest = _episode_destination(
-        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), rich_names=True
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), fancy_title=True
     )
     assert dest == Path("/dest/Futurama/Season 01/S01E01-Space Pilot 3000-Futurama-720p.mkv")
 
 
-def test_rich_names_episode_no_episode_title():
+def test_fancy_title_episode_no_episode_title():
     """S01E01-Show Name-720p.mkv when episode title is absent."""
     match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
     guessed = GuessedMedia(
@@ -221,12 +221,12 @@ def test_rich_names_episode_no_episode_title():
         raw_guess={"screen_size": "720p"},
     )
     dest = _episode_destination(
-        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), rich_names=True
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), fancy_title=True
     )
     assert dest == Path("/dest/Futurama/Season 01/S01E01-Futurama-720p.mkv")
 
 
-def test_rich_names_episode_no_quality():
+def test_fancy_title_episode_no_quality():
     """S01E01-Episode Title-Show Name.mkv when no screen_size in raw_guess."""
     match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
     guessed = GuessedMedia(
@@ -239,13 +239,13 @@ def test_rich_names_episode_no_quality():
         raw_guess={},
     )
     dest = _episode_destination(
-        Path("/dest"), match, guessed, Path("Futurama.S01E01.mkv"), rich_names=True
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.mkv"), fancy_title=True
     )
     assert dest == Path("/dest/Futurama/Season 01/S01E01-Space Pilot 3000-Futurama.mkv")
 
 
-def test_rich_names_false_gives_plain_code():
-    """Default (rich_names=False) still produces plain S01E01.mkv."""
+def test_fancy_title_false_gives_plain_code():
+    """Default (fancy_title=False) still produces plain S01E01.mkv."""
     match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
     guessed = GuessedMedia(
         source_path=Path("Futurama.S01E01.720p.mkv"),
@@ -257,7 +257,7 @@ def test_rich_names_false_gives_plain_code():
         raw_guess={"screen_size": "720p"},
     )
     dest = _episode_destination(
-        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), rich_names=False
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), fancy_title=False
     )
     assert dest == Path("/dest/Futurama/Season 01/S01E01.mkv")
 
@@ -282,8 +282,107 @@ def test_quality_tag_absent():
     assert _quality_tag(guessed) == ""
 
 
-def test_plan_move_rich_names_episode():
-    """plan_move passes rich_names=True through to the destination."""
+def test_dedupe_key_episode_includes_normalised_title():
+    """Multi-segment slots get different keys; quality is excluded."""
+    from jellyfiler.planner import _dedupe_key
+
+    match = TmdbMatch(tmdb_id=42, title="Show", year=2020, media_type=MediaType.EPISODE)
+    seg_a = GuessedMedia(
+        source_path=Path("a.1080p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Show",
+        season=3,
+        episode=8,
+        episode_title="Warners",
+        raw_guess={"screen_size": "1080p"},
+    )
+    seg_b = GuessedMedia(
+        source_path=Path("b.720p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Show",
+        season=3,
+        episode=8,
+        episode_title="The Flame Returns",
+        raw_guess={"screen_size": "720p"},
+    )
+    assert _dedupe_key(seg_a, match) != _dedupe_key(seg_b, match)
+
+
+def test_dedupe_key_excludes_quality():
+    """Same episode at different qualities → SAME key (duplicates)."""
+    from jellyfiler.planner import _dedupe_key
+
+    match = TmdbMatch(tmdb_id=42, title="Show", year=2020, media_type=MediaType.EPISODE)
+    high = GuessedMedia(
+        source_path=Path("a.1080p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Show",
+        season=1,
+        episode=1,
+        episode_title="Pilot",
+        raw_guess={"screen_size": "1080p"},
+    )
+    low = GuessedMedia(
+        source_path=Path("b.720p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Show",
+        season=1,
+        episode=1,
+        episode_title="Pilot",
+        raw_guess={"screen_size": "720p"},
+    )
+    assert _dedupe_key(high, match) == _dedupe_key(low, match)
+
+
+def test_dedupe_key_normalises_title_case_and_whitespace():
+    from jellyfiler.planner import _dedupe_key
+
+    match = TmdbMatch(tmdb_id=42, title="Show", year=2020, media_type=MediaType.EPISODE)
+    a = GuessedMedia(
+        source_path=Path("a.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Show",
+        season=1,
+        episode=1,
+        episode_title="Pilot",
+    )
+    b = GuessedMedia(
+        source_path=Path("b.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Show",
+        season=1,
+        episode=1,
+        episode_title="  pilot  ",
+    )
+    assert _dedupe_key(a, match) == _dedupe_key(b, match)
+
+
+def test_dedupe_key_movie_uses_tmdb_id_and_year():
+    from jellyfiler.planner import _dedupe_key
+
+    match = TmdbMatch(tmdb_id=99, title="Coco", year=2017, media_type=MediaType.MOVIE)
+    a = GuessedMedia(
+        source_path=Path("a.1080p.mkv"), media_type=MediaType.MOVIE, title="Coco", year=2017
+    )
+    b = GuessedMedia(
+        source_path=Path("b.720p.mkv"), media_type=MediaType.MOVIE, title="Coco", year=2017
+    )
+    assert _dedupe_key(a, match) == _dedupe_key(b, match)
+
+
+def test_plan_move_populates_dedupe_key():
+    """plan_move must set dedupe_key on the returned PlannedMove."""
+    guessed = _guessed(MediaType.EPISODE, "Futurama", season=12, episode=3)
+    guessed.episode_title = "Bender's Bender"
+    match = TmdbMatch(tmdb_id=2, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    result = plan_move(guessed, match, Path("/dest"), Path("Futurama.S12E03.mkv"))
+    assert result.dedupe_key is not None
+    assert result.dedupe_key[0] == "episode"
+    assert result.dedupe_key[1] == 2  # tmdb_id
+
+
+def test_plan_move_fancy_title_episode():
+    """plan_move passes fancy_title=True through to the destination."""
     guessed = GuessedMedia(
         source_path=Path("Futurama.S12E03.720p.mkv"),
         media_type=MediaType.EPISODE,
@@ -295,7 +394,7 @@ def test_plan_move_rich_names_episode():
     )
     match = TmdbMatch(tmdb_id=2, title="Futurama", year=1999, media_type=MediaType.EPISODE)
     result = plan_move(
-        guessed, match, Path("/dest"), Path("Futurama.S12E03.720p.mkv"), rich_names=True
+        guessed, match, Path("/dest"), Path("Futurama.S12E03.720p.mkv"), fancy_title=True
     )
     assert not result.skipped
     assert result.destination == Path(

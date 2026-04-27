@@ -216,7 +216,7 @@ class OrganizeContext:
     interactive: bool
     use_ai: bool
     forced_media_type: MediaType
-    rich_names: bool
+    fancy_title: bool
     quiet: bool
     force: bool
     ai_disabled: bool = False  # toggled to True if the user opts out mid-run
@@ -633,7 +633,7 @@ def _classify_file(
             file=file,
             kind="pinned",
             guessed=guessed,
-            move=plan_move(guessed, pinned, ctx.dest, file, rich_names=ctx.rich_names),
+            move=plan_move(guessed, pinned, ctx.dest, file, fancy_title=ctx.fancy_title),
         )
 
     # 7. Needs the TMDB lookup chain
@@ -718,7 +718,7 @@ def _finalize_after_lookup(
             progress.start()
 
     # Plan + pin
-    move = plan_move(guessed, match, ctx.dest, file, rich_names=ctx.rich_names)
+    move = plan_move(guessed, match, ctx.dest, file, fancy_title=ctx.fancy_title)
     if match:
         ctx.cache.set_pinned(lookup.search_title, cache_year, guessed.media_type, match)
     return FileResult(kind="planned", move=move)
@@ -1158,13 +1158,17 @@ def organize(
             help="Remove empty source directories after moving (only with --in-place --apply).",
         ),
     ] = False,
-    rich_names: Annotated[
+    fancy_title: Annotated[
         bool,
         typer.Option(
-            "--rich-names",
-            help="Include episode title, series title, and quality in the destination filename.",
+            "--fancy-title/--slim-title",
+            help=(
+                "Fancy (default): S01E01-Episode Title-Show Name-720p.ext. "
+                "Slim: S01E01.ext. Fancy filenames disambiguate multi-segment "
+                "episode slots (e.g. Animaniacs) that would otherwise collide."
+            ),
         ),
-    ] = False,
+    ] = True,
     cache_db: Annotated[
         Path,
         typer.Option("--cache-db", help="Path to the SQLite cache database."),
@@ -1258,7 +1262,7 @@ def organize(
         interactive=interactive,
         use_ai=use_ai,
         forced_media_type=media_type,
-        rich_names=rich_names,
+        fancy_title=fancy_title,
         quiet=quiet,
         force=force,
         parallel=parallel,
@@ -1409,7 +1413,7 @@ def dedupe(
         interactive=interactive,
         use_ai=False,
         forced_media_type=MediaType.UNKNOWN,
-        rich_names=False,
+        fancy_title=False,
         quiet=quiet,
         force=True,  # in dedupe we don't skip already-moved files (we want to find dupes)
         parallel=parallel,

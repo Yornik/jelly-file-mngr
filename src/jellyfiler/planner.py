@@ -29,11 +29,11 @@ def _episode_destination(
     match: TmdbMatch,
     guessed: GuessedMedia,
     source: Path,
-    rich_names: bool = False,
+    fancy_title: bool = False,
 ) -> Path:
     """Jellyfin episode convention: Show Name/Season XX/S01E01.ext
 
-    With rich_names=True: S01E01-Episode Title-Show Name-720p.ext
+    With fancy_title=True: S01E01-Episode Title-Show Name-720p.ext
     """
     show_name = _safe_name(match.title)
     season = guessed.season or 1
@@ -49,7 +49,7 @@ def _episode_destination(
     else:
         base_code = f"S{season:02d}E{episode:02d}{seg}"
 
-    if rich_names:
+    if fancy_title:
         parts = [base_code]
         if guessed.episode_title:
             parts.append(_safe_name(guessed.episode_title))
@@ -69,7 +69,7 @@ def plan_move(
     match: TmdbMatch | None,
     dest_root: Path,
     source: Path,
-    rich_names: bool = False,
+    fancy_title: bool = False,
 ) -> PlannedMove:
     if not match:
         return PlannedMove(
@@ -100,7 +100,7 @@ def plan_move(
                     "run with --interactive to pick manually"
                 ),
             )
-        destination = _episode_destination(dest_root, match, guessed, source, rich_names)
+        destination = _episode_destination(dest_root, match, guessed, source, fancy_title)
     else:
         return PlannedMove(
             source=source,
@@ -113,6 +113,8 @@ def plan_move(
             skip_reason=f"Cannot determine media type for '{source.name}'",
         )
 
+    dedupe_key = _dedupe_key(guessed, match)
+
     if source == destination:
         return PlannedMove(
             source=source,
@@ -123,6 +125,7 @@ def plan_move(
             confidence="high",
             skipped=True,
             skip_reason="Already in the correct Jellyfin location — no action needed",
+            dedupe_key=dedupe_key,
         )
 
     return PlannedMove(
@@ -132,7 +135,30 @@ def plan_move(
         tmdb_id=match.tmdb_id,
         matched_title=match.title,
         confidence="high",
+        dedupe_key=dedupe_key,
     )
+
+
+def _dedupe_key(guessed: GuessedMedia, match: TmdbMatch) -> tuple[object, ...]:
+    """Identity tuple for dedupe — same key = same canonical content.
+
+    Excludes resolution/quality so 1080p and 720p of the same episode collide.
+    Includes the episode title (lowercased, whitespace-trimmed) so multi-segment
+    slots (Animaniacs S03E08 with two different segment titles) DON'T collide.
+    """
+    if guessed.media_type == MediaType.EPISODE:
+        norm_title = (guessed.episode_title or "").strip().lower()
+        seg = guessed.segment or ""
+        return (
+            "episode",
+            match.tmdb_id,
+            guessed.season or 1,
+            guessed.episode,
+            guessed.episode_end,
+            seg,
+            norm_title,
+        )
+    return ("movie", match.tmdb_id, match.year)
 
 
 def build_plan(planned_moves: list[PlannedMove]) -> Plan:
