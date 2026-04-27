@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-uv run jellyfiler <source> <dest>        # dry-run (default)
-uv run jellyfiler <source> <dest> --apply
+uv run jellyfiler organize <source> <dest>        # dry-run (default)
+uv run jellyfiler organize <source> <dest> --apply
 
 uv run pytest                            # all tests
 uv run pytest tests/test_junk.py -v     # single test file
