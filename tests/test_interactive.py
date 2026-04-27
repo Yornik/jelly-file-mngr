@@ -145,3 +145,124 @@ def test_prompt_manual_title_whitespace_only_returns_none():
     with patch("jellyfiler.interactive.typer.prompt", return_value="   "):
         result = prompt_manual_title("file.mkv", "")
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# prompt_duplicate_choice
+# ---------------------------------------------------------------------------
+
+
+def _dup_group(tmp_path):
+    """Build a 2-element duplicate group (helper)."""
+    from pathlib import Path
+
+    from jellyfiler.models import PlannedMove
+
+    a = tmp_path / "a.1080p.mkv"
+    b = tmp_path / "b.720p.mkv"
+    a.touch()
+    b.touch()
+    dest = Path("/dest/Show/S01E01.mkv")
+    return [
+        PlannedMove(
+            source=a,
+            destination=dest,
+            media_type=MediaType.EPISODE,
+            tmdb_id=1,
+            matched_title="Show",
+            confidence="high",
+        ),
+        PlannedMove(
+            source=b,
+            destination=dest,
+            media_type=MediaType.EPISODE,
+            tmdb_id=1,
+            matched_title="Show",
+            confidence="high",
+        ),
+    ]
+
+
+def test_prompt_duplicate_choice_keep_index_1(tmp_path):
+    from jellyfiler.dedupe import DuplicateChoice
+    from jellyfiler.interactive import prompt_duplicate_choice
+
+    group = _dup_group(tmp_path)
+    with patch("jellyfiler.interactive.typer.prompt", return_value="1"):
+        choice = prompt_duplicate_choice(group)
+    assert choice.kind == DuplicateChoice.KEEP_INDEX
+    assert choice.index == 0
+
+
+def test_prompt_duplicate_choice_keep_index_2(tmp_path):
+    from jellyfiler.dedupe import DuplicateChoice
+    from jellyfiler.interactive import prompt_duplicate_choice
+
+    group = _dup_group(tmp_path)
+    with patch("jellyfiler.interactive.typer.prompt", return_value="2"):
+        choice = prompt_duplicate_choice(group)
+    assert choice.kind == DuplicateChoice.KEEP_INDEX
+    assert choice.index == 1
+
+
+def test_prompt_duplicate_choice_skip_all(tmp_path):
+    from jellyfiler.dedupe import DuplicateChoice
+    from jellyfiler.interactive import prompt_duplicate_choice
+
+    group = _dup_group(tmp_path)
+    with patch("jellyfiler.interactive.typer.prompt", return_value="s"):
+        choice = prompt_duplicate_choice(group)
+    assert choice.kind == DuplicateChoice.SKIP_ALL
+
+
+def test_prompt_duplicate_choice_always_higher(tmp_path):
+    from jellyfiler.dedupe import DuplicateChoice
+    from jellyfiler.interactive import prompt_duplicate_choice
+
+    group = _dup_group(tmp_path)
+    with patch("jellyfiler.interactive.typer.prompt", return_value="a"):
+        choice = prompt_duplicate_choice(group)
+    assert choice.kind == DuplicateChoice.ALWAYS_HIGHER
+
+
+def test_prompt_duplicate_choice_always_quarantine(tmp_path):
+    from jellyfiler.dedupe import DuplicateChoice
+    from jellyfiler.interactive import prompt_duplicate_choice
+
+    group = _dup_group(tmp_path)
+    with patch("jellyfiler.interactive.typer.prompt", return_value="q"):
+        choice = prompt_duplicate_choice(group)
+    assert choice.kind == DuplicateChoice.ALWAYS_QUARANTINE
+
+
+def test_prompt_duplicate_choice_delete_losers(tmp_path):
+    from jellyfiler.dedupe import DuplicateChoice
+    from jellyfiler.interactive import prompt_duplicate_choice
+
+    group = _dup_group(tmp_path)
+    with patch("jellyfiler.interactive.typer.prompt", return_value="d"):
+        choice = prompt_duplicate_choice(group)
+    assert choice.kind == DuplicateChoice.DELETE_LOSERS
+    assert choice.index == 0
+
+
+def test_prompt_duplicate_choice_invalid_input_defaults_to_one(tmp_path):
+    from jellyfiler.dedupe import DuplicateChoice
+    from jellyfiler.interactive import prompt_duplicate_choice
+
+    group = _dup_group(tmp_path)
+    with patch("jellyfiler.interactive.typer.prompt", return_value="abc"):
+        choice = prompt_duplicate_choice(group)
+    assert choice.kind == DuplicateChoice.KEEP_INDEX
+    assert choice.index == 0
+
+
+def test_prompt_duplicate_choice_out_of_range_defaults_to_one(tmp_path):
+    from jellyfiler.dedupe import DuplicateChoice
+    from jellyfiler.interactive import prompt_duplicate_choice
+
+    group = _dup_group(tmp_path)
+    with patch("jellyfiler.interactive.typer.prompt", return_value="99"):
+        choice = prompt_duplicate_choice(group)
+    assert choice.kind == DuplicateChoice.KEEP_INDEX
+    assert choice.index == 0

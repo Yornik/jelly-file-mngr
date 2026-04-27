@@ -119,3 +119,57 @@ def prompt_manual_title(filename: str, guessed_title: str) -> str | None:
         default="",
     )
     return raw.strip() or None
+
+
+def prompt_duplicate_choice(group):  # type: ignore[no-untyped-def]
+    """Ask the user how to resolve a duplicate-destination group.
+
+    `group` is a list of PlannedMove sorted highest-quality-first. Returns a
+    DuplicateChoice. Imported lazily so dedupe.py and interactive.py don't
+    have a circular dependency.
+    """
+    from jellyfiler.dedupe import DuplicateChoice, describe
+
+    dest = group[0].destination
+
+    console.print("\n[bold yellow]Duplicate detected[/bold yellow] — both would land at:")
+    console.print(f"  [cyan]{dest}[/cyan]\n")
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Source file (highest quality first)")
+    for i, m in enumerate(group, start=1):
+        table.add_row(str(i), describe(m))
+    console.print(table)
+
+    console.print(
+        "\n  [bold]1..N[/bold]  keep that file, skip the others (others stay in source)\n"
+        "  [bold]s[/bold]     skip all (move none of them)\n"
+        "  [bold]a[/bold]     always keep highest quality for the rest of this run "
+        "(losers stay in source)\n"
+        "  [bold]q[/bold]     always keep highest quality + quarantine losers to "
+        ".junk/duplicates/ (recoverable)\n"
+        "  [bold red]d[/bold red]     [bold red]DELETE the lower-quality file(s) AND their parent "
+        "directories[/bold red] (this group only — not sticky)\n"
+    )
+
+    raw = typer.prompt("Choice", default="1").strip().lower()
+
+    if raw == "s":
+        return DuplicateChoice(DuplicateChoice.SKIP_ALL)
+    if raw == "a":
+        return DuplicateChoice(DuplicateChoice.ALWAYS_HIGHER)
+    if raw == "q":
+        return DuplicateChoice(DuplicateChoice.ALWAYS_QUARANTINE)
+    if raw == "d":
+        # DELETE_LOSERS: keep the highest-quality (index 0), nuke the rest + their dirs.
+        return DuplicateChoice(DuplicateChoice.DELETE_LOSERS, index=0)
+    try:
+        idx = int(raw)
+    except ValueError:
+        console.print("[yellow]Invalid input — defaulting to highest quality (1).[/yellow]")
+        idx = 1
+    if idx < 1 or idx > len(group):
+        console.print("[yellow]Out of range — defaulting to highest quality (1).[/yellow]")
+        idx = 1
+    return DuplicateChoice(DuplicateChoice.KEEP_INDEX, index=idx - 1)

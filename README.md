@@ -24,6 +24,20 @@ S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
 
 Useful when people browse the SMB share directly rather than through Jellyfin. Jellyfin itself reads the `SxxExx` pattern and is happy with either format.
 
+### Duplicate handling
+When two source files would land at the same destination (e.g. a 1080p and a 720p of the same episode), jellyfiler decides what to do based on flags:
+
+| Flag(s) | Behaviour | Reversible? |
+|---|---|---|
+| (none) interactive | Prompts per duplicate pair. Shows path + resolution + size for each candidate. Options: keep one, skip both, sticky "always highest", sticky "always highest + quarantine losers", **one-shot "delete losers + their parent dir"**. | Per choice |
+| (none) `--no-interactive` | Skip both files in every duplicate pair. Safe default for unattended runs. | Yes |
+| `--quarantine-duplicates` | Auto-keep highest quality, move losers to `dest/.junk/duplicates/`. Single flag — no extra confirmation since it's reversible. Cron-friendly. | Yes |
+| `--remove-duplicates --i-mean-it` | Auto-keep highest quality, **PERMANENTLY DELETE** losers. The double-flag protects against accidents in cron jobs. | **No** |
+
+Quality ranking: filename resolution tag (2160p > 1080p > 720p > 480p) is the primary key, file size on disk is the tiebreaker.
+
+`--remove-duplicates` without `--i-mean-it` aborts with a big red warning — there is no "delete by accident" path.
+
 ### Subtitle sidecars
 After each video move, subtitle files sharing the same stem (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`, `.sup`) are moved alongside and renamed to match the destination. Language codes are preserved: `episode.en.srt` → `S01E05.en.srt`.
 
