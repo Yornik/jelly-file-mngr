@@ -150,3 +150,51 @@ def test_execute_live_raises_on_move_failure(tmp_path):
         pytest.raises(ExecutionError, match="failed to move"),
     ):
         execute(plan, dry_run=False)
+
+
+# ---------------------------------------------------------------------------
+# _short_dest — compact path display
+# ---------------------------------------------------------------------------
+
+
+def test_short_dest_three_parts_keeps_last_three():
+    from jellyfiler.executor import _short_dest
+
+    dest = Path("/big/long/root/Show/Season 01/S01E01.mkv")
+    out = _short_dest(dest, None)
+    assert out.endswith("Show/Season 01/S01E01.mkv")
+
+
+def test_short_dest_two_parts_returns_both():
+    from jellyfiler.executor import _short_dest
+
+    out = _short_dest(Path("Movie/file.mkv"), None)
+    assert out == "Movie/file.mkv"
+
+
+def test_short_dest_single_part_returns_name():
+    from jellyfiler.executor import _short_dest
+
+    out = _short_dest(Path("file.mkv"), None)
+    assert out == "file.mkv"
+
+
+# ---------------------------------------------------------------------------
+# Subtitle move failure path during live execute
+# ---------------------------------------------------------------------------
+
+
+def test_execute_logs_subtitle_failure_but_video_still_moves(tmp_path):
+    """If a subtitle's _move_subtitle raises, the video move still succeeds."""
+    src = tmp_path / "ep.mkv"
+    sub = tmp_path / "ep.srt"
+    src.touch()
+    sub.touch()
+    dst = tmp_path / "out" / "ep.mkv"
+    plan = Plan(moves=[_move(src, dst)])
+
+    with patch("jellyfiler.executor._move_subtitle", side_effect=OSError("sub move failed")):
+        execute(plan, dry_run=False)
+
+    assert dst.exists()  # video moved
+    assert sub.exists()  # subtitle untouched (failed to move)

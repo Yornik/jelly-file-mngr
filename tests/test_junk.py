@@ -357,3 +357,89 @@ def test_report_junk_live(tmp_path):
     dest = tmp_path / "dest"
     files = [source / "Sample.mkv"]
     report_junk(files, source, dest, dry_run=False)
+
+
+# ---------------------------------------------------------------------------
+# Anime OP/ED and OVA/ONA detection (real-world filenames from SMB share)
+# ---------------------------------------------------------------------------
+
+
+def test_junk_ncop_anime_opening(tmp_path):
+    """[Coalgirls]_Ao_no_Exorcist_NCOP_(...) — Non-Credit Opening."""
+    f = tmp_path / "[Coalgirls]_Ao_no_Exorcist_NCOP_(1920x1080_Blu-Ray_FLAC)_[E92D4C42].mkv"
+    f.touch()
+    assert is_junk(f)
+
+
+def test_junk_nced_anime_ending(tmp_path):
+    """[Coalgirls]_Ao_no_Exorcist_NCED_(...) — Non-Credit Ending."""
+    f = tmp_path / "[Coalgirls]_Ao_no_Exorcist_NCED_(1920x1080_Blu-Ray_FLAC)_[00518C15].mkv"
+    f.touch()
+    assert is_junk(f)
+
+
+def test_junk_nced2_numbered_ending(tmp_path):
+    """NCED2 — second ending track, also junk."""
+    f = tmp_path / "[Coalgirls]_Ao_no_Exorcist_NCED2_(1920x1080_Blu-Ray_FLAC)_[3E5D24F0].mkv"
+    f.touch()
+    assert is_junk(f)
+
+
+def test_junk_creditless_op_anime(tmp_path):
+    """Creditless_OP1 — alternative spelling for non-credit opening."""
+    f = tmp_path / "Fate_Stay_Night_Creditless_OP1_[720p,BluRay,x264]_-_THORA.mkv"
+    f.touch()
+    assert is_junk(f)
+
+
+def test_junk_creditless_op2(tmp_path):
+    """Creditless_OP2 — numbered creditless opening."""
+    f = tmp_path / "Fate_Stay_Night_Creditless_OP2_[720p,BluRay,x264]_-_THORA.mkv"
+    f.touch()
+    assert is_junk(f)
+
+
+def test_ova_files_are_NOT_junked(tmp_path):
+    """OVAs are legitimate content (Jellyfin treats them as S00 specials) — must NOT be junked."""
+    f = tmp_path / "[Cerberus] KonoSuba OVA - 01 [BD 1080p].mkv"
+    f.touch()
+    assert not is_junk(f)
+
+
+def test_ova_subdirectory_is_NOT_junked(tmp_path):
+    """An OVA/ folder full of bonus episodes is library content, not trash."""
+    sub = tmp_path / "OVA"
+    sub.mkdir()
+    f = sub / "Show.S00E01.mkv"
+    f.touch()
+    assert not is_junk(f)
+
+
+def test_junk_openings_directory(tmp_path):
+    """Openings/ folder is junk."""
+    sub = tmp_path / "Openings"
+    sub.mkdir()
+    f = sub / "Opening 1.mkv"
+    f.touch()
+    assert is_junk(f)
+
+
+def test_normal_episode_with_operation_in_title_is_not_junk(tmp_path):
+    """'Operation Ruthless' contains 'OP' but isn't an opening — must NOT match."""
+    f = tmp_path / "Hey Arnold S01E07a Operation Ruthless.mkv"
+    f.touch()
+    assert not is_junk(f)
+
+
+def test_normal_episode_with_ending_in_title_is_not_junk(tmp_path):
+    """'Endings Are Always...' is an episode title, not a creditless ending."""
+    f = tmp_path / "[OZC]Planetes E19 'Endings Are Always...'.mkv"
+    f.touch()
+    assert not is_junk(f)
+
+
+def test_eden_does_not_match_ed_token(tmp_path):
+    """Standalone 'ED' must require word boundary — 'Eden' shouldn't trigger."""
+    f = tmp_path / "Garden of Eden S01E05.mkv"
+    f.touch()
+    assert not is_junk(f)

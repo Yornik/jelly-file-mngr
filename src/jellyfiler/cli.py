@@ -14,9 +14,19 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn
 from jellyfiler.ai_query import AiQueryError, preflight_check, suggest_search
 from jellyfiler.anilist import looks_like_anime, search_anime
 from jellyfiler.cache import _DEFAULT_DB, Cache
+from jellyfiler.dedupe import (
+    find_duplicate_groups,
+    quarantine_path,
+    resolve_duplicates,
+)
 from jellyfiler.executor import ExecutionError, execute
 from jellyfiler.guesser import guess
-from jellyfiler.interactive import prompt_episode_number, prompt_manual_title, prompt_tmdb_match
+from jellyfiler.interactive import (
+    prompt_duplicate_choice,
+    prompt_episode_number,
+    prompt_manual_title,
+    prompt_tmdb_match,
+)
 from jellyfiler.junk import is_junk, move_junk, report_junk
 from jellyfiler.models import MediaType, PlannedMove
 from jellyfiler.planner import build_plan, plan_move
@@ -199,6 +209,39 @@ def organize(
             help="Include episode title, series title, and quality in the destination filename: S01E01-Episode Title-Show Name-720p.ext",
         ),
     ] = False,
+    quarantine_duplicates: Annotated[
+        bool,
+        typer.Option(
+            "--quarantine-duplicates",
+            help=(
+                "Auto-resolve duplicate destinations: keep the highest-quality file "
+                "and move losers to dest/.junk/duplicates/ (recoverable). "
+                "Cron-friendly: no extra confirmation flag needed since it's reversible."
+            ),
+        ),
+    ] = False,
+    remove_duplicates: Annotated[
+        bool,
+        typer.Option(
+            "--remove-duplicates",
+            help=(
+                "Auto-resolve duplicate destinations: keep the highest-quality file "
+                "and PERMANENTLY DELETE the rest. This is the only flag in the tool "
+                "that deletes user files. Requires --i-mean-it to actually run."
+            ),
+        ),
+    ] = False,
+    i_mean_it: Annotated[
+        bool,
+        typer.Option(
+            "--i-mean-it",
+            help=(
+                "Required confirmation alongside --remove-duplicates. "
+                "Without this flag, --remove-duplicates aborts with a warning. "
+                "This double-flag protects against accidental deletion in cron jobs."
+            ),
+        ),
+    ] = False,
     cache_db: Annotated[
         Path,
         typer.Option("--cache-db", help="Path to the SQLite cache database."),
@@ -255,6 +298,41 @@ def organize(
     if cleanup_empty_dirs and not in_place:
         err_console.print(
             "[bold red]Error:[/bold red] --cleanup-empty-dirs only makes sense with --in-place."
+        )
+        raise typer.Exit(1)
+
+    # Safety gate for the auto-dedupe feature: --remove-duplicates without
+    # --i-mean-it always aborts with a big red warning, so a typo or a
+    # misconfigured cron job can't quietly start deleting files.
+    if remove_duplicates and not i_mean_it:
+        err_console.print(
+            "\n"
+            "[bold white on red]"
+            " ╔════════════════════════════════════════════════════════════════════╗ \n"
+            " ║              ⚠  PERMANENT FILE DELETION REQUESTED  ⚠               ║ \n"
+            " ║                                                                    ║ \n"
+            " ║   --remove-duplicates will PERMANENTLY DELETE the lower-quality    ║ \n"
+            " ║   copy of every duplicate-destination pair found on this run.      ║ \n"
+            " ║   Files are unlinked from disk. There is no undo.                  ║ \n"
+            " ║                                                                    ║ \n"
+            " ║   To actually run, you MUST also pass --i-mean-it.                 ║ \n"
+            " ║   This double-flag protects against accidents and cron typos.      ║ \n"
+            " ╚════════════════════════════════════════════════════════════════════╝ "
+            "[/bold white on red]"
+        )
+        err_console.print(
+            "\n[bold red]Aborting. Add --i-mean-it to confirm permanent deletion.[/bold red]\n"
+        )
+        raise typer.Exit(1)
+    if i_mean_it and not remove_duplicates:
+        err_console.print(
+            "[bold red]Error:[/bold red] --i-mean-it has no effect without --remove-duplicates."
+        )
+        raise typer.Exit(1)
+    if quarantine_duplicates and remove_duplicates:
+        err_console.print(
+            "[bold red]Error:[/bold red] Cannot combine --quarantine-duplicates with --remove-duplicates. "
+            "Quarantine moves losers to .junk/duplicates/ (recoverable); remove deletes them."
         )
         raise typer.Exit(1)
 
@@ -622,11 +700,103 @@ def organize(
 
     plan = build_plan(planned_moves)
 
+    # Resolve duplicate destinations before preflight (which would otherwise abort).
+    duplicate_groups = find_duplicate_groups(plan.moves)
+    losers_to_delete: list[PlannedMove] = []
+    losers_to_quarantine: list[PlannedMove] = []
+    dirs_to_remove: set[Path] = set()
+    if duplicate_groups:
+        if not quiet:
+            console.print(
+                f"\n[bold yellow]Duplicate destinations detected:[/bold yellow] "
+                f"{len(duplicate_groups)} group(s) — resolving..."
+            )
+        # `--quarantine-duplicates` is a non-interactive auto-quarantine: always
+        # keep the highest quality, move losers to .junk/duplicates/. We achieve
+        # it by injecting a synthetic "always quarantine" prompt that fires once.
+        from jellyfiler.dedupe import DuplicateChoice as _DC
+        from jellyfiler.dedupe import PromptFn as _PromptFn
+
+        prompt_fn: _PromptFn | None
+        if quarantine_duplicates:
+
+            def _quarantine_prompt(_group: list[PlannedMove]) -> _DC:
+                return _DC(_DC.ALWAYS_QUARANTINE)
+
+            prompt_fn = _quarantine_prompt
+            run_interactive = True  # so resolve_duplicates calls our synthetic prompt
+        elif interactive:
+            prompt_fn = prompt_duplicate_choice
+            run_interactive = True
+        else:
+            prompt_fn = None
+            run_interactive = False
+        plan, losers_to_delete, losers_to_quarantine, dirs_to_remove = resolve_duplicates(
+            plan,
+            interactive=run_interactive,
+            auto_remove=remove_duplicates,
+            prompt=prompt_fn,
+        )
+        if losers_to_delete and not quiet:
+            console.print(
+                f"[bold red]{len(losers_to_delete)} duplicate loser(s) will be PERMANENTLY DELETED[/bold red]"
+            )
+        if dirs_to_remove and not quiet:
+            console.print(
+                f"[bold red]{len(dirs_to_remove)} parent director{'y' if len(dirs_to_remove) == 1 else 'ies'} "
+                f"will also be removed (per user choice)[/bold red]"
+            )
+        if losers_to_quarantine and not quiet:
+            console.print(
+                f"[yellow]{len(losers_to_quarantine)} duplicate loser(s) will be quarantined to "
+                f"{dest / '.junk' / 'duplicates'}[/yellow]"
+            )
+
     try:
         execute(plan, dry_run=dry_run, cache=cache, source_root=source)
     except ExecutionError as exc:
         err_console.print(f"\n[bold red]{exc}[/bold red]")
         raise typer.Exit(1) from exc
+
+    # Handle duplicate losers AFTER execute() succeeds — never touch losers
+    # if the main run failed.
+    if not dry_run:
+        if losers_to_quarantine:
+            import shutil as _shutil
+
+            for loser in losers_to_quarantine:
+                qpath = quarantine_path(loser, source, dest)
+                try:
+                    qpath.parent.mkdir(parents=True, exist_ok=True)
+                    if qpath.exists():
+                        console.print(f"[dim]  quarantine target exists, skipping: {qpath}[/dim]")
+                        continue
+                    _shutil.move(str(loser.source), str(qpath))
+                    console.print(f"[dim]  duplicate → {qpath}[/dim]")
+                except Exception as exc:
+                    err_console.print(
+                        f"[yellow]Could not quarantine {loser.source}: {exc}[/yellow]"
+                    )
+
+        if losers_to_delete:
+            for loser in losers_to_delete:
+                try:
+                    if loser.source.exists():
+                        loser.source.unlink()
+                        console.print(f"[red]  deleted duplicate: {loser.source}[/red]")
+                except Exception as exc:
+                    err_console.print(f"[yellow]Could not delete {loser.source}: {exc}[/yellow]")
+
+        if dirs_to_remove:
+            import shutil as _shutil
+
+            for d in dirs_to_remove:
+                try:
+                    if d.exists():
+                        _shutil.rmtree(d)
+                        console.print(f"[red]  removed directory: {d}[/red]")
+                except Exception as exc:
+                    err_console.print(f"[yellow]Could not remove {d}: {exc}[/yellow]")
 
     _print_summary(
         planned=len(plan.moves),

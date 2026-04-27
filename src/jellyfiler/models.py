@@ -21,6 +21,10 @@ class GuessedMedia:
     episode: int | None = None
     episode_end: int | None = None
     episode_title: str | None = None
+    # Single-letter segment marker for split episodes (Hey Arnold-style "S01E01a", "S01E01b").
+    # Two 11-minute halves of one slot — preserved in the destination filename so the two
+    # files don't collide on S01E01.mkv.
+    segment: str | None = None
     raw_guess: dict[str, object] = field(default_factory=dict)
 
 

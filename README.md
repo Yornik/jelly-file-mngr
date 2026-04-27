@@ -24,10 +24,38 @@ S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
 
 Useful when people browse the SMB share directly rather than through Jellyfin. Jellyfin itself reads the `SxxExx` pattern and is happy with either format.
 
+### Duplicate handling
+When two source files would land at the same destination (e.g. a 1080p and a 720p of the same episode), jellyfiler decides what to do based on flags:
+
+| Flag(s) | Behaviour | Reversible? |
+|---|---|---|
+| (none) interactive | Prompts per duplicate pair. Shows path + resolution + size for each candidate. Options: keep one, skip both, sticky "always highest", sticky "always highest + quarantine losers", **one-shot "delete losers + their parent dir"**. | Per choice |
+| (none) `--no-interactive` | Skip both files in every duplicate pair. Safe default for unattended runs. | Yes |
+| `--quarantine-duplicates` | Auto-keep highest quality, move losers to `dest/.junk/duplicates/`. Single flag — no extra confirmation since it's reversible. Cron-friendly. | Yes |
+| `--remove-duplicates --i-mean-it` | Auto-keep highest quality, **PERMANENTLY DELETE** losers. The double-flag protects against accidents in cron jobs. | **No** |
+
+Quality ranking: filename resolution tag (2160p > 1080p > 720p > 480p) is the primary key, file size on disk is the tiebreaker.
+
+`--remove-duplicates` without `--i-mean-it` aborts with a big red warning — there is no "delete by accident" path.
+
 ### Subtitle sidecars
 After each video move, subtitle files sharing the same stem (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`, `.sup`) are moved alongside and renamed to match the destination. Language codes are preserved: `episode.en.srt` → `S01E05.en.srt`.
 
 Subtitles packed in a subdirectory next to the video (`Subs/`, `Subtitles/`, `English/`, etc.) are automatically discovered — not just files sitting directly beside the video.
+
+### OVA routing to Season 00
+OVAs / OADs / ONAs (Original Video / Animation / Net Animation — anime side stories) are auto-routed to **Season 00** (Jellyfin's Specials slot) so they don't collide with regular-season episode numbering. Detection works on the filename (`Show.OVA.01.mkv`) or the parent dir (`OVA/`). Files already tagged `S00E01` are left alone.
+
+### Real-world title parsing
+Battle-tested against ~350 real release names from a messy SMB library. The parser handles:
+
+- **Spaced SxxExx**: `Show - S01 E01 - Title.mp4` (extra space between season/episode)
+- **Three-digit episodes**: `[Judas] Hunter x Hunter (2011) - S01E001.mkv`
+- **Dual numbering**: `American Dad! S07E01 (S08E01) Hot Water.mkv` → uses Fox numbering (TMDB-aligned)
+- **Split-episode markers**: `S01E01a Downtown.mkv` / `S01E01b Eugene's Bike.mkv` — letter suffix preserved in destination so the two halves don't collide
+- **Dash-separated movie subtitles**: `The Punisher - War Zone (2008).mkv` → `Punisher: War Zone` (combines `title + alternative_title` for movies only — TV folder noise stays out)
+- **Year-range season folders**: `Season 1 (1994-95)` doesn't leak `year=1994` into the search
+- **Anime intro/outro tracks**: `NCOP`, `NCED`, `Creditless_OP1`, `Non-Credit Ending` → quarantined as junk (never canonical episodes), but episode titles like "Endings Are Always..." or "Operation Ruthless" are NOT misclassified.
 
 ### Claude Haiku AI search fallback
 When TMDB title-variant retries **and** the AniList anime fallback both miss, pass `--use-ai` to send the raw release directory and filename to `claude-haiku-4-5` for a clean search query. Requires `ANTHROPIC_API_KEY` — the flag is always opt-in so tokens are never spent without explicit intent. AniList runs first, so anime titles only reach the paid AI fallback when AniList itself can't find them.
@@ -124,6 +152,14 @@ uv run jellyfiler organize /source /dest --no-interactive --apply
 # Include episode title, series name, and quality in destination filenames
 # e.g. S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
 uv run jellyfiler organize /source /dest --rich-names --apply
+
+# Auto-resolve duplicate destinations — keep highest quality, quarantine
+# losers to dest/.junk/duplicates/ (recoverable, cron-friendly)
+uv run jellyfiler organize /source /dest --quarantine-duplicates --apply
+
+# Auto-resolve duplicate destinations — keep highest quality, PERMANENTLY
+# DELETE losers. Double-flag required to prevent accidents.
+uv run jellyfiler organize /source /dest --remove-duplicates --i-mean-it --apply
 
 # Enable Claude Haiku AI fallback for titles that defeat all other parsing
 # (requires ANTHROPIC_API_KEY — off by default to avoid unintentional spend)
@@ -222,10 +258,13 @@ uv run jellyfiler cache clear --all             # full reset
 ## Safety guarantees
 
 - **Dry-run is the default.** You must pass `--apply` to move anything.
-- **Nothing is ever deleted.** Files are moved, never removed. Junk is quarantined to `.junk/`, not discarded.
-- **Nothing is ever overwritten.** If the destination already exists, the move is skipped.
-- **Pre-flight checks run before the first file is touched.** If any problem is found (missing source, duplicate destination) the entire operation aborts with a clear error message — no partial moves.
-- **Ambiguous matches are interactively resolved or skipped.** A wrong TMDB match is more dangerous than a skip. The tool defaults to asking you rather than guessing wrong.
+- **Nothing is overwritten.** If the destination already exists, the move is skipped.
+- **Pre-flight checks run before the first file is touched.** Missing sources or unresolved problems abort the entire operation with a clear error — no partial moves.
+- **Ambiguous matches are interactively resolved or skipped.** A wrong TMDB match is more dangerous than a skip. The tool defaults to asking rather than guessing wrong.
+- **Junk is quarantined, not discarded.** Sample/trailer/sidecar/`NCOP` files go to `.junk/` in the destination, where they're easy to recover or delete by hand.
+- **Deletion requires explicit double-flag opt-in.** The *only* way the tool ever deletes a file is `--remove-duplicates --i-mean-it`. Either flag alone aborts. The interactive duplicate prompt also has a one-shot **delete** option (`d`) that you must type per group — it's deliberately not sticky.
+
+The interactive **delete-and-remove-parent-dir** option (`d` in the duplicate prompt) and the `--remove-duplicates --i-mean-it` flag pair are the only paths that ever `unlink()` user files. Everything else is a `move` or skip.
 
 ---
 

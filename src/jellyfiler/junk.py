@@ -38,6 +38,21 @@ _JUNK_VIDEO_STEMS = re.compile(
     re.IGNORECASE,
 )
 
+# Anime opening/ending themes — Non-Credit OP/ED variants.
+# These are intro/outro music videos, never canonical episodes. Match on a
+# whole token in the stem: needs a non-word separator (or string boundary)
+# on both sides so "Operation" or "Eden" don't trigger.
+_ANIME_OP_ED = re.compile(
+    r"(?:^|[\W_])"
+    r"(?:NCOP|NCED"
+    r"|Creditless[\W_]+(?:OP|ED|Opening|Ending)"
+    r"|Non[\W_]?Credit[\W_]+(?:OP|ED|Opening|Ending))"
+    r"\d*"
+    r"(?:$|[\W_])",
+    re.IGNORECASE,
+)
+
+
 # A file whose entire stem is a hex hash (MD5/SHA-like) is junk.
 _HEX_HASH = re.compile(r"^[0-9a-f]{16,}$", re.IGNORECASE)
 
@@ -84,6 +99,12 @@ _JUNK_DIR_NAMES = re.compile(
     | ^fake\ endings?$
     | ^shorts?$
     | ^promos?$
+    | ^OPs?$             # Openings folder
+    | ^EDs?$             # Endings folder
+    | ^Openings?$
+    | ^Endings?$
+    | ^Creditless$
+    | ^NC(OP|ED)s?$
     """,
     re.VERBOSE | re.IGNORECASE,
 )
@@ -109,6 +130,9 @@ def is_junk(path: Path) -> bool:
         if _JUNK_VIDEO_STEMS.match(stem):
             return True
         if _HEX_HASH.match(stem):
+            return True
+        # Anime non-credit OP/ED tracks: never canonical episodes.
+        if _ANIME_OP_ED.search(stem):
             return True
 
     # Check parent directory names — catches Featurettes/Zombie Meat.mkv etc.

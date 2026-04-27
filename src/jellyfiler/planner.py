@@ -43,10 +43,11 @@ def _episode_destination(
     season_folder = f"Season {season:02d}"
     ext = source.suffix.lower()
 
+    seg = guessed.segment or ""
     if guessed.episode_end is not None and guessed.episode_end != episode:
         base_code = f"S{season:02d}E{episode:02d}-E{guessed.episode_end:02d}"
     else:
-        base_code = f"S{season:02d}E{episode:02d}"
+        base_code = f"S{season:02d}E{episode:02d}{seg}"
 
     if rich_names:
         parts = [base_code]

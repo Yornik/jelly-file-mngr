@@ -85,5 +85,5 @@ sudo mount -t cifs //192.168.1.42/lilnasx /mnt/smbshare -o username=yornik,uid=1
 - New filesystem mutations belong in `executor.py` or `junk.py` — not in `cli.py`.
 - New persistent data needs a new column or table in `cache.py::_SCHEMA`.
 - `cli.py` imports everything explicitly — new modules need wiring there.
-- Coverage threshold is 30% (set in `pyproject.toml`). Running only a new test file in isolation will fail the coverage gate even if all tests pass — run `uv run pytest` to check overall coverage.
+- Coverage threshold is 80% (set in `pyproject.toml`). Running only a new test file in isolation will fail the coverage gate even if all tests pass — run `uv run pytest` to check overall coverage.
 - Use `pytest` fixture pattern for `Cache` tests (yield + close) to avoid `ResourceWarning` on unclosed SQLite connections.
