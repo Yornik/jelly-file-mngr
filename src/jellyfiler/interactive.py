@@ -148,7 +148,7 @@ def prompt_duplicate_choice(group):  # type: ignore[no-untyped-def]
         "  [bold]a[/bold]     always keep highest quality for the rest of this run "
         "(losers stay in source)\n"
         "  [bold]q[/bold]     always keep highest quality + quarantine losers to "
-        ".junk/duplicates/ (recoverable)\n"
+        ".aside/duplicates/ (recoverable)\n"
         "  [bold red]d[/bold red]     [bold red]DELETE the lower-quality file(s) AND their parent "
         "directories[/bold red] (this group only — not sticky)\n"
     )

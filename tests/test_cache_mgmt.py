@@ -84,8 +84,8 @@ def test_clear_all(cache: Cache, tmp_path: Path) -> None:
     assert s == {"tmdb_cache": 0, "pinned": 0, "move_log": 0}
 
 
-def test_junk_report_truncates_at_10(tmp_path: Path) -> None:
-    from jellyfiler.junk import report_junk
+def test_aside_report_truncates_at_10(tmp_path: Path) -> None:
+    from jellyfiler.aside import report_aside
 
     files = [tmp_path / f"sample{i}.nfo" for i in range(15)]
     for f in files:
@@ -95,14 +95,14 @@ def test_junk_report_truncates_at_10(tmp_path: Path) -> None:
     from rich.console import Console
 
     buf = StringIO()
-    import jellyfiler.junk as junk_module
+    import jellyfiler.aside as aside_module
 
-    orig = junk_module.console
-    junk_module.console = Console(file=buf, highlight=False)
+    orig = aside_module.console
+    aside_module.console = Console(file=buf, highlight=False)
     try:
-        report_junk(files, tmp_path, tmp_path / "dest", dry_run=True)
+        report_aside(files, tmp_path, tmp_path / "dest", dry_run=True)
     finally:
-        junk_module.console = orig
+        aside_module.console = orig
 
     output = buf.getvalue()
     assert "and 5 more" in output

@@ -22,8 +22,8 @@ Patterns covered (sampled from a 226-folder series library + 121 movies):
 
 from pathlib import Path
 
+from jellyfiler.aside import is_aside
 from jellyfiler.guesser import guess
-from jellyfiler.junk import is_junk
 from jellyfiler.models import MediaType
 
 # ---------------------------------------------------------------------------
@@ -310,27 +310,27 @@ def test_non_ova_episode_keeps_normal_season():
 def test_real_ncop_anime_opening_is_junk(tmp_path):
     f = tmp_path / "[Coalgirls]_Ao_no_Exorcist_NCOP_(1920x1080_Blu-Ray_FLAC)_[E92D4C42].mkv"
     f.touch()
-    assert is_junk(f)
+    assert is_aside(f)
 
 
 def test_real_creditless_op_is_junk(tmp_path):
     f = tmp_path / "Fate_Stay_Night_Creditless_OP1_[720p,BluRay,x264]_-_THORA.mkv"
     f.touch()
-    assert is_junk(f)
+    assert is_aside(f)
 
 
 def test_real_planetes_episode_with_endings_in_title_is_NOT_junk(tmp_path):
     """[OZC]Planetes E19 'Endings Are Always...' — title contains 'Endings' but it's an episode."""
     f = tmp_path / "[OZC]Planetes E19 'Endings Are Always...'.mkv"
     f.touch()
-    assert not is_junk(f)
+    assert not is_aside(f)
 
 
 def test_real_hey_arnold_operation_ruthless_not_junk(tmp_path):
     """Episode title contains 'Operation' (starts with OP) — must not be flagged as opening."""
     f = tmp_path / "S01E07a Operation Ruthless.mkv"
     f.touch()
-    assert not is_junk(f)
+    assert not is_aside(f)
 
 
 # ---------------------------------------------------------------------------

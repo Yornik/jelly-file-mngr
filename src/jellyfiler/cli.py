@@ -39,6 +39,12 @@ from rich.text import Text
 
 from jellyfiler.ai_query import AiQueryError, preflight_check, suggest_search
 from jellyfiler.anilist import looks_like_anime, search_anime
+from jellyfiler.aside import (
+    JELLYFIN_EXTRAS_SUBDIR,
+    AsideKind,
+    aside_destination,
+    classify_aside,
+)
 from jellyfiler.cache import _DEFAULT_DB, Cache
 from jellyfiler.dedupe import (
     DuplicateChoice,
@@ -55,7 +61,7 @@ from jellyfiler.interactive import (
     prompt_manual_title,
     prompt_tmdb_match,
 )
-from jellyfiler.junk import is_junk, move_junk, report_junk
+from jellyfiler.jsonlog import NullLogger, open_logger
 from jellyfiler.models import GuessedMedia, MediaType, Plan, PlannedMove
 from jellyfiler.planner import build_plan, plan_move
 from jellyfiler.scanner import find_media_files
@@ -221,6 +227,7 @@ class OrganizeContext:
     force: bool
     ai_disabled: bool = False  # toggled to True if the user opts out mid-run
     parallel: int = 1
+    logger: NullLogger = field(default_factory=NullLogger)
 
 
 @dataclass
@@ -229,7 +236,10 @@ class ClassifiedFile:
 
     ``kind`` is one of:
         ``cached``        — already moved in a prior run, skip silently
-        ``junk``          — junk filter matched, will be moved to .junk/
+        ``aside``         — non-canonical content (sample, NCOP, DVD Extras …);
+                            ``aside_kind`` carries the typed classification so
+                            the caller can route it (Jellyfin extras subdir or
+                            DISCARD)
         ``skipped``       — pre-decided skip (unknown type, no title, ...);
                             ``move`` carries the skipped PlannedMove
         ``pinned``        — TMDB lookup short-circuits via cache.get_pinned();
@@ -241,6 +251,7 @@ class ClassifiedFile:
     kind: str
     guessed: GuessedMedia | None = None  # set for needs_lookup
     move: PlannedMove | None = None  # set for skipped / pinned
+    aside_kind: AsideKind | None = None  # set for aside
 
 
 @dataclass
@@ -248,16 +259,18 @@ class FileResult:
     """Outcome of processing one file.
 
     ``kind`` is one of:
-        ``planned``   — :attr:`move` is set (may be skipped=True)
-        ``junk``      — file should be added to the junk list (no move)
-        ``cached``    — already-moved file, skip silently
+        ``planned``    — :attr:`move` is set (may be skipped=True)
+        ``aside``      — non-canonical content; :attr:`aside_kind` is set so
+                         the caller can route it (Jellyfin extras vs DISCARD)
+        ``cached``     — already-moved file, skip silently
         ``tmdb_error`` — fatal lookup error; caller should break out of the loop
-        ``ai_abort``  — user declined to disable AI after an error; abort run
+        ``ai_abort``   — user declined to disable AI after an error; abort run
     """
 
     kind: str
     move: PlannedMove | None = None
     error_msg: str = ""
+    aside_kind: AsideKind | None = None
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -331,10 +344,40 @@ def _validate_dedupe_flags(
     if quarantine_duplicates and remove_duplicates:
         err_console.print(
             "[bold red]Error:[/bold red] Cannot combine --quarantine-duplicates with "
-            "--remove-duplicates. Quarantine moves losers to .junk/duplicates/ "
+            "--remove-duplicates. Quarantine moves losers to .aside/duplicates/ "
             "(recoverable); remove deletes them."
         )
         raise typer.Exit(1)
+
+
+def _validate_remove_discards_flags(remove_discards: bool, i_mean_it: bool) -> None:
+    """Safety gate for ``--remove-discards`` on the organize command.
+
+    --remove-discards alone aborts with a big red warning. With --i-mean-it,
+    files classified DISCARD (samples, NCOP/NCED, .nfo, hash-named, RARBG promos)
+    are unlinked. Without either flag, those files go to dest/.aside/ as before.
+    """
+    if remove_discards and not i_mean_it:
+        err_console.print(
+            "\n"
+            "[bold white on red]"
+            " ╔════════════════════════════════════════════════════════════════════╗ \n"
+            " ║          ⚠  PERMANENT FILE DELETION REQUESTED (DISCARDS)  ⚠        ║ \n"
+            " ║                                                                    ║ \n"
+            " ║   --remove-discards will PERMANENTLY DELETE every file classified  ║ \n"
+            " ║   as DISCARD: samples, NCOP/NCED tracks, hash-named files, .nfo /  ║ \n"
+            " ║   .txt / .jpg sidecars, RARBG promo videos. Unlinked from disk.    ║ \n"
+            " ║                                                                    ║ \n"
+            " ║   To actually run, you MUST also pass --i-mean-it.                 ║ \n"
+            " ║   Without it, those files go to dest/.aside/ (recoverable).        ║ \n"
+            " ╚════════════════════════════════════════════════════════════════════╝ "
+            "[/bold white on red]"
+        )
+        err_console.print(
+            "\n[bold red]Aborting. Add --i-mean-it to confirm permanent deletion.[/bold red]\n"
+        )
+        raise typer.Exit(1)
+    # i_mean_it without remove_discards is allowed — the same flag is used by dedupe.
 
 
 def _ai_preflight(use_ai: bool, quiet: bool) -> None:
@@ -556,13 +599,16 @@ def _classify_file(
     if not ctx.force and ctx.cache.already_moved(file):
         if not ctx.quiet:
             console.print(f"[dim]SKIP (cached):[/dim] {file.name}")
+        ctx.logger.debug("classify_cached", file=file)
         return ClassifiedFile(file=file, kind="cached")
 
-    # 2. Junk filter
-    if is_junk(file):
+    # 2. Aside filter (non-canonical content: extras, samples, NFOs, NCOP/NCED…)
+    aside_kind = classify_aside(file)
+    if aside_kind is not None:
         if not ctx.quiet:
-            console.print(f"[dim]JUNK:[/dim] {file.name}")
-        return ClassifiedFile(file=file, kind="junk")
+            console.print(f"[dim]ASIDE ({aside_kind.value}):[/dim] {file.name}")
+        ctx.logger.info("classify_aside", file=file, aside_kind=aside_kind.value)
+        return ClassifiedFile(file=file, kind="aside", aside_kind=aside_kind)
 
     # 3. Guess
     guessed = guess(file)
@@ -629,6 +675,14 @@ def _classify_file(
     if pinned:
         if not ctx.quiet:
             console.print(f"[dim]PINNED:[/dim] {guessed.title} → {pinned.title} ({pinned.year})")
+        ctx.logger.info(
+            "classify_pinned",
+            file=file,
+            guessed_title=guessed.title,
+            tmdb_id=pinned.tmdb_id,
+            tmdb_title=pinned.title,
+            tmdb_year=pinned.year,
+        )
         return ClassifiedFile(
             file=file,
             kind="pinned",
@@ -637,6 +691,7 @@ def _classify_file(
         )
 
     # 7. Needs the TMDB lookup chain
+    ctx.logger.debug("classify_needs_lookup", file=file, guessed_title=guessed.title)
     return ClassifiedFile(file=file, kind="needs_lookup", guessed=guessed)
 
 
@@ -721,6 +776,23 @@ def _finalize_after_lookup(
     move = plan_move(guessed, match, ctx.dest, file, rich_names=ctx.rich_names)
     if match:
         ctx.cache.set_pinned(lookup.search_title, cache_year, guessed.media_type, match)
+        ctx.logger.info(
+            "match_resolved",
+            file=file,
+            search_title=lookup.search_title,
+            tmdb_id=match.tmdb_id,
+            tmdb_title=match.title,
+            tmdb_year=match.year,
+            confidence=move.confidence,
+            pinned=True,
+        )
+    elif move.skipped:
+        ctx.logger.warning(
+            "match_skipped",
+            file=file,
+            guessed_title=guessed.title,
+            reason=move.skip_reason,
+        )
     return FileResult(kind="planned", move=move)
 
 
@@ -737,8 +809,8 @@ def _process_one_file(
     classified = _classify_file(file, ctx, progress=progress)
     if classified.kind == "cached":
         return FileResult(kind="cached")
-    if classified.kind == "junk":
-        return FileResult(kind="junk")
+    if classified.kind == "aside":
+        return FileResult(kind="aside", aside_kind=classified.aside_kind)
     if classified.kind in ("skipped", "pinned"):
         assert classified.move is not None
         return FileResult(kind="planned", move=classified.move)
@@ -758,7 +830,10 @@ class PipelineResult:
     """Aggregated outcomes from running the per-file loop over many files."""
 
     planned_moves: list[PlannedMove] = field(default_factory=list)
-    junk_files: list[Path] = field(default_factory=list)
+    # (path, AsideKind) pairs — kind drives later routing decisions:
+    # DISCARD → .aside/ (or unlinked with --remove-discards),
+    # everything else → Jellyfin extras subdir of the parent media item.
+    aside_files: list[tuple[Path, AsideKind]] = field(default_factory=list)
     tmdb_errors: int = 0
     aborted: bool = False  # set when caller hit ai_abort or fatal tmdb error
 
@@ -786,8 +861,9 @@ def _run_pipeline(files: list[Path], ctx: OrganizeContext) -> PipelineResult:
             progress.update(task, description=f"[cyan]{label}[/cyan]")
 
             result = _process_one_file(file, ctx, progress=progress)
-            if result.kind == "junk":
-                out.junk_files.append(file)
+            if result.kind == "aside":
+                assert result.aside_kind is not None
+                out.aside_files.append((file, result.aside_kind))
             elif result.kind == "planned" and result.move is not None:
                 out.planned_moves.append(result.move)
             elif result.kind == "tmdb_error":
@@ -937,8 +1013,9 @@ def _run_pipeline_parallel(files: list[Path], ctx: OrganizeContext) -> PipelineR
             progress.advance(finalize_task)
             if cf.kind == "cached":
                 continue
-            if cf.kind == "junk":
-                out.junk_files.append(cf.file)
+            if cf.kind == "aside":
+                assert cf.aside_kind is not None
+                out.aside_files.append((cf.file, cf.aside_kind))
                 continue
             if cf.kind in ("skipped", "pinned"):
                 assert cf.move is not None
@@ -975,7 +1052,7 @@ def _apply_dedupe_actions(
 ) -> None:
     """Apply the post-execute file actions for the dedupe pass.
 
-    Quarantine first (move → .junk/duplicates/), then delete loser files,
+    Quarantine first (move → .aside/duplicates/), then delete loser files,
     then rmtree the marked parent directories. Each step swallows individual
     errors so one bad file doesn't abort the whole cleanup.
     """
@@ -1070,32 +1147,152 @@ def _resolve_dedupe(
         if losers_to_quarantine:
             console.print(
                 f"[yellow]{len(losers_to_quarantine)} duplicate loser(s) will be quarantined to "
-                f"{dest / '.junk' / 'duplicates'}[/yellow]"
+                f"{dest / '.aside' / 'duplicates'}[/yellow]"
             )
 
     return plan, losers_to_delete, losers_to_quarantine, dirs_to_remove
 
 
 # ───────────────────────────────────────────────────────────────────────────
-# Junk + cleanup helpers
+# Aside routing — Jellyfin-aware extras placement
 # ───────────────────────────────────────────────────────────────────────────
 
 
-def _handle_junk_files(
-    junk_files: list[Path],
+def _find_anchor(file: Path, planned_moves: list[PlannedMove]) -> PlannedMove | None:
+    """Find the planned media move that an aside file 'belongs to'.
+
+    Walks ``file``'s parent directories. For each ancestor, looks for a planned
+    move whose source is also under that ancestor. The deepest such ancestor
+    that has a movie/episode planned move is the anchor — its destination's
+    parent (movie folder) or grand-parent (show folder for episodes) is where
+    the Jellyfin extras subdir goes.
+    """
+    for parent in file.parents:
+        for move in planned_moves:
+            try:
+                if move.source.is_relative_to(parent) and move.media_type in (
+                    MediaType.MOVIE,
+                    MediaType.EPISODE,
+                ):
+                    return move
+            except ValueError:
+                # is_relative_to can raise on weird paths — just skip
+                continue
+    return None
+
+
+def _anchor_dir(anchor: PlannedMove) -> Path:
+    """Where Jellyfin-recognised extras subdirs live for the anchored media.
+
+    Movies:   ``dest/Movie (Year)/`` → ``destination.parent``
+    TV shows: ``dest/Show/`` → ``destination.parent.parent``  (parent of Season)
+    """
+    if anchor.media_type == MediaType.EPISODE:
+        return anchor.destination.parent.parent
+    return anchor.destination.parent
+
+
+@dataclass
+class AsideAction:
+    """One routing decision for an aside file."""
+
+    source: Path
+    kind: AsideKind
+    action: str  # 'jellyfin_extras' | 'aside_pile' | 'discard'
+    destination: Path | None = None  # set for jellyfin_extras and aside_pile
+
+
+def _plan_aside_routing(
+    aside_files: list[tuple[Path, AsideKind]],
+    planned_moves: list[PlannedMove],
     source: Path,
     dest: Path,
+    remove_discards: bool,
+) -> list[AsideAction]:
+    """Decide what to do with each aside file.
+
+    Routing rules:
+      * DISCARD kind + ``remove_discards=True``  → action='discard' (unlink)
+      * DISCARD kind + ``remove_discards=False`` → action='aside_pile'
+        (moved to ``dest/.aside/``, recoverable)
+      * Other kinds with a Jellyfin extras subdir AND a parent media anchor
+        → action='jellyfin_extras', destination set to
+          ``<anchor_dir>/<jellyfin_subdir>/<filename>``
+      * Other kinds with no anchor (orphan extras) → action='aside_pile'
+    """
+    actions: list[AsideAction] = []
+    for path, kind in aside_files:
+        if kind == AsideKind.DISCARD:
+            if remove_discards:
+                actions.append(AsideAction(source=path, kind=kind, action="discard"))
+            else:
+                actions.append(
+                    AsideAction(
+                        source=path,
+                        kind=kind,
+                        action="aside_pile",
+                        destination=aside_destination(path, source, dest),
+                    )
+                )
+            continue
+
+        subdir = JELLYFIN_EXTRAS_SUBDIR.get(kind)
+        anchor = _find_anchor(path, planned_moves) if subdir else None
+        if subdir and anchor is not None:
+            target = _anchor_dir(anchor) / subdir / path.name
+            actions.append(
+                AsideAction(source=path, kind=kind, action="jellyfin_extras", destination=target)
+            )
+        else:
+            # No anchor or no Jellyfin mapping — fall back to .aside/
+            actions.append(
+                AsideAction(
+                    source=path,
+                    kind=kind,
+                    action="aside_pile",
+                    destination=aside_destination(path, source, dest),
+                )
+            )
+    return actions
+
+
+def _apply_aside_actions(
+    actions: list[AsideAction],
     dry_run: bool,
+    logger: NullLogger,
 ) -> int:
-    """Report junk files and (when not dry-run) move them to dest/.junk/. Returns total bytes."""
-    junk_bytes = sum(f.stat().st_size for f in junk_files if f.exists())
-    if junk_files:
-        report_junk(junk_files, source, dest, dry_run)
-        if not dry_run:
-            _moved, failed = move_junk(junk_files, source, dest)
-            if failed:
-                err_console.print(f"[yellow]{failed} junk file(s) could not be moved.[/yellow]")
-    return junk_bytes
+    """Execute the planned aside actions. Returns total bytes processed."""
+    import contextlib
+
+    total_bytes = 0
+    for act in actions:
+        with contextlib.suppress(OSError):
+            total_bytes += act.source.stat().st_size if act.source.exists() else 0
+        if dry_run:
+            continue
+        try:
+            if act.action == "discard":
+                if act.source.exists():
+                    act.source.unlink()
+                    console.print(f"[red]  deleted:[/red] {act.source}")
+                    logger.warning("aside_discarded", file=act.source, kind=act.kind.value)
+            elif act.action in ("jellyfin_extras", "aside_pile"):
+                assert act.destination is not None
+                act.destination.parent.mkdir(parents=True, exist_ok=True)
+                if act.destination.exists():
+                    console.print(f"[dim]  aside target exists, skipping:[/dim] {act.destination}")
+                    continue
+                shutil.move(str(act.source), str(act.destination))
+                console.print(f"[dim]  {act.action}:[/dim] {act.source.name} → {act.destination}")
+                logger.info(
+                    f"aside_{act.action}",
+                    file=act.source,
+                    kind=act.kind.value,
+                    destination=act.destination,
+                )
+        except OSError as exc:
+            err_console.print(f"[yellow]aside failed for {act.source}: {exc}[/yellow]")
+    return total_bytes
 
 
 def _remove_empty_dirs(root: Path) -> None:
@@ -1205,6 +1402,53 @@ def organize(
             ),
         ),
     ] = 40,
+    full_plan: Annotated[
+        bool,
+        typer.Option(
+            "--full-plan",
+            help=(
+                "Print every row of the move/skip plan. By default the table "
+                "truncates after 50 rows so terminals stay usable on libraries "
+                "with thousands of files."
+            ),
+        ),
+    ] = False,
+    log_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--log",
+            help=(
+                "Write a structured JSON-lines log of every classification, "
+                "lookup, plan decision, dedupe action, and move to the given "
+                "file path. Append-only; safe under --parallel. Useful for "
+                "later analysis with jq, or post-mortem on a failed run."
+            ),
+        ),
+    ] = None,
+    remove_discards: Annotated[
+        bool,
+        typer.Option(
+            "--remove-discards",
+            help=(
+                "PERMANENTLY DELETE files classified as DISCARD (samples, "
+                "NCOP/NCED tracks, hash-named files, .nfo / .txt / .jpg "
+                "sidecars, RARBG promo videos). Without this flag they are "
+                "moved to dest/.aside/ instead (recoverable). Requires "
+                "--i-mean-it to actually run."
+            ),
+        ),
+    ] = False,
+    i_mean_it: Annotated[
+        bool,
+        typer.Option(
+            "--i-mean-it",
+            help=(
+                "Required confirmation alongside --remove-discards (and the "
+                "matching --remove-duplicates flag in `dedupe`). Without it, "
+                "any deletion request aborts with a big red warning."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Scan SOURCE, match against TMDB, and organize into DEST.
 
@@ -1214,6 +1458,7 @@ def organize(
     if parallel < 1:
         err_console.print("[bold red]Error:[/bold red] --parallel must be >= 1.")
         raise typer.Exit(1)
+    _validate_remove_discards_flags(remove_discards, i_mean_it)
     dest = _validate_in_place_args(in_place, dest, source, cleanup_empty_dirs)
     dry_run = not apply or dry_run_flag
     _ai_preflight(use_ai, quiet)
@@ -1250,6 +1495,19 @@ def organize(
         console.print(f"[dim]Cache: {cache_db}[/dim]\n")
 
     cache = Cache(cache_db)
+    logger = open_logger(log_path)
+    logger.info(
+        "run_started",
+        command="organize",
+        source=source,
+        dest=dest,
+        dry_run=dry_run,
+        parallel=parallel,
+        interactive=interactive,
+        use_ai=use_ai,
+        rich_names=rich_names,
+        file_count=len(files),
+    )
     ctx = OrganizeContext(
         source=source,
         dest=dest,
@@ -1262,12 +1520,27 @@ def organize(
         quiet=quiet,
         force=force,
         parallel=parallel,
+        logger=logger,
     )
 
     pipeline = _run_pipeline(files, ctx)
 
-    junk_bytes = _handle_junk_files(pipeline.junk_files, source, dest, dry_run)
     plan = build_plan(pipeline.planned_moves)
+
+    # Smart-route aside files into Jellyfin extras subdirs (or .aside/ / DISCARD).
+    aside_actions = _plan_aside_routing(
+        pipeline.aside_files,
+        plan.moves,
+        source,
+        dest,
+        remove_discards=remove_discards,
+    )
+    if aside_actions and not quiet:
+        action_counts: dict[str, int] = {}
+        for a in aside_actions:
+            action_counts[a.action] = action_counts.get(a.action, 0) + 1
+        parts = [f"[bold]{n}[/bold] {label}" for label, n in sorted(action_counts.items())]
+        console.print(f"\n[yellow]Aside routing:[/yellow] {', '.join(parts)}")
 
     # `organize` skips duplicates silently — the user runs `dedupe` to clean them up.
     duplicate_groups = find_duplicate_groups(plan.moves)
@@ -1277,6 +1550,11 @@ def organize(
             "skipping both files in each pair. Use 'jellyfiler dedupe' to resolve.[/yellow]"
         )
     if duplicate_groups:
+        logger.warning(
+            "duplicate_groups_detected",
+            group_count=len(duplicate_groups),
+            action="skipped",
+        )
         plan, _del, _quar, _dirs = _resolve_dedupe(
             plan,
             interactive=False,  # force skip-both behavior in organize
@@ -1287,19 +1565,40 @@ def organize(
         )
 
     try:
-        execute(plan, dry_run=dry_run, cache=cache, source_root=source)
+        execute(
+            plan,
+            dry_run=dry_run,
+            cache=cache,
+            source_root=source,
+            full_plan=full_plan,
+        )
     except ExecutionError as exc:
         err_console.print(f"\n[bold red]{exc}[/bold red]")
+        logger.error("execute_failed", error=str(exc))
+        logger.close()
         raise typer.Exit(1) from exc
+
+    aside_bytes = _apply_aside_actions(aside_actions, dry_run, logger)
 
     _print_summary(
         planned=len(plan.moves),
         skipped=len(plan.skipped),
-        junk_count=len(pipeline.junk_files),
-        junk_bytes=junk_bytes,
+        junk_count=len(aside_actions),
+        junk_bytes=aside_bytes,
         tmdb_errors=pipeline.tmdb_errors,
         dry_run=dry_run,
     )
+    logger.info(
+        "run_finished",
+        command="organize",
+        planned=len(plan.moves),
+        skipped=len(plan.skipped),
+        aside_count=len(aside_actions),
+        aside_bytes=aside_bytes,
+        tmdb_errors=pipeline.tmdb_errors,
+        dry_run=dry_run,
+    )
+    logger.close()
 
     if pipeline.tmdb_errors:
         err_console.print(
@@ -1334,7 +1633,7 @@ def dedupe(
         bool,
         typer.Option(
             "--quarantine-duplicates",
-            help="Auto-keep highest quality, move losers to dest/.junk/duplicates/ (recoverable).",
+            help="Auto-keep highest quality, move losers to dest/.aside/duplicates/ (recoverable).",
         ),
     ] = False,
     remove_duplicates: Annotated[
@@ -1372,6 +1671,20 @@ def dedupe(
             ),
         ),
     ] = 40,
+    full_plan: Annotated[
+        bool,
+        typer.Option(
+            "--full-plan",
+            help="Print every row of the move/skip plan (default truncates at 50).",
+        ),
+    ] = False,
+    log_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--log",
+            help="Write a JSON-lines event log to the given path (matching, dedupe, deletions).",
+        ),
+    ] = None,
 ) -> None:
     """Find and resolve duplicate-destination files in SOURCE.
 
@@ -1401,6 +1714,19 @@ def dedupe(
         raise typer.Exit(0)
 
     cache = Cache(cache_db)
+    logger = open_logger(log_path)
+    logger.info(
+        "run_started",
+        command="dedupe",
+        source=source,
+        dest=dest,
+        dry_run=dry_run,
+        parallel=parallel,
+        interactive=interactive,
+        quarantine_duplicates=quarantine_duplicates,
+        remove_duplicates=remove_duplicates,
+        file_count=len(files),
+    )
     ctx = OrganizeContext(
         source=source,
         dest=dest,
@@ -1413,6 +1739,7 @@ def dedupe(
         quiet=quiet,
         force=True,  # in dedupe we don't skip already-moved files (we want to find dupes)
         parallel=parallel,
+        logger=logger,
     )
 
     pipeline = _run_pipeline(files, ctx)
@@ -1430,6 +1757,8 @@ def dedupe(
     if not (losers_to_delete or losers_to_quarantine):
         if not quiet:
             console.print("[green]No duplicates to resolve.[/green]")
+        logger.info("dedupe_no_duplicates")
+        logger.close()
         raise typer.Exit(0)
 
     if dry_run:
@@ -1437,7 +1766,22 @@ def dedupe(
             f"\n[bold cyan]DRY RUN[/bold cyan] — pass --apply to actually delete/quarantine. "
             f"Would resolve {len(losers_to_delete) + len(losers_to_quarantine)} loser(s)."
         )
+        logger.info(
+            "dedupe_planned",
+            to_delete=len(losers_to_delete),
+            to_quarantine=len(losers_to_quarantine),
+            dirs_to_remove=len(dirs_to_remove),
+            dry_run=True,
+        )
+        logger.close()
         raise typer.Exit(0)
+
+    for loser in losers_to_delete:
+        logger.warning("dedupe_will_delete", file=loser.source)
+    for loser in losers_to_quarantine:
+        logger.info("dedupe_will_quarantine", file=loser.source)
+    for d in dirs_to_remove:
+        logger.warning("dedupe_will_rmtree", path=d)
 
     _apply_dedupe_actions(losers_to_delete, losers_to_quarantine, dirs_to_remove, source, dest)
     if not quiet:
@@ -1445,6 +1789,14 @@ def dedupe(
             f"\n[bold green]Done.[/bold green] "
             f"Resolved {len(losers_to_delete) + len(losers_to_quarantine)} duplicate(s)."
         )
+    logger.info(
+        "run_finished",
+        command="dedupe",
+        deleted=len(losers_to_delete),
+        quarantined=len(losers_to_quarantine),
+        dirs_removed=len(dirs_to_remove),
+    )
+    logger.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

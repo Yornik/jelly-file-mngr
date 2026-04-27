@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from jellyfiler.junk import find_junk, is_junk, junk_destination, move_junk, report_junk
+from jellyfiler.aside import aside_destination, find_aside, is_aside, move_aside, report_aside
 
 # ---------------------------------------------------------------------------
-# is_junk — non-video sidecar extensions
+# is_aside — non-video sidecar extensions
 # ---------------------------------------------------------------------------
 
 
@@ -31,45 +31,56 @@ from jellyfiler.junk import find_junk, is_junk, junk_destination, move_junk, rep
         "readme.html",
     ],
 )
-def test_is_junk_sidecar_extensions(filename):
-    assert is_junk(Path(filename))
+def test_is_aside_sidecar_extensions(filename):
+    assert is_aside(Path(filename))
 
 
 # ---------------------------------------------------------------------------
-# is_junk — video files with junk stem patterns
+# is_aside — video files with junk stem patterns
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "filename",
     [
+        # Stems that are ALWAYS aside regardless of where they live
         "Sample.mkv",
         "sample.mp4",
         "SAMPLE.avi",
-        "Trailer.mkv",
-        "trailer.mp4",
         "RARBG.com.mp4",
         "RARBG.com.mkv",
         "rarbg.info.mp4",
         "RARBG.mkv",
         "etrg.mp4",
         "www.YTS.AM.mp4",
+    ],
+)
+def test_is_aside_video_stem_patterns(filename):
+    assert is_aside(Path(filename))
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        # These need a parent-dir hint now (Featurettes/, Behind The Scenes/, etc.)
+        # rather than being detected by stem alone, because "Trailer.mkv" or
+        # "Scene.mkv" can be real movie names.
+        "Trailer.mkv",
         "Featurette.mkv",
         "Deleted.Scenes.mkv",
-        "deleted_scenes.mkv",
         "Behind.The.Scenes.mkv",
-        "behind-the-scenes.mkv",
         "Interview.mkv",
-        "Short.Film.mkv",
         "Scene.mkv",
     ],
 )
-def test_is_junk_video_stem_patterns(filename):
-    assert is_junk(Path(filename))
+def test_no_longer_detected_by_stem_alone(filename):
+    """These stems WERE flagged as junk by the old binary classifier; now they
+    only count as aside when in a known parent dir (Featurettes/, etc.)."""
+    assert not is_aside(Path(filename))
 
 
 # ---------------------------------------------------------------------------
-# is_junk — hex hash filenames
+# is_aside — hex hash filenames
 # ---------------------------------------------------------------------------
 
 
@@ -82,12 +93,12 @@ def test_is_junk_video_stem_patterns(filename):
         "ABCDEF0123456789.mkv",  # uppercase hex
     ],
 )
-def test_is_junk_hex_hash(filename):
-    assert is_junk(Path(filename))
+def test_is_aside_hex_hash(filename):
+    assert is_aside(Path(filename))
 
 
 # ---------------------------------------------------------------------------
-# is_junk — real media files should NOT be junk
+# is_aside — real media files should NOT be junk
 # ---------------------------------------------------------------------------
 
 
@@ -105,22 +116,22 @@ def test_is_junk_hex_hash(filename):
         "abcdefg0123456789.mkv",
     ],
 )
-def test_is_not_junk_real_files(filename):
-    assert not is_junk(Path(filename))
+def test_is_not_aside_real_files(filename):
+    assert not is_aside(Path(filename))
 
 
 # ---------------------------------------------------------------------------
-# is_junk — unknown/non-media extensions are not flagged as junk video
+# is_aside — unknown/non-media extensions are not flagged as junk video
 # ---------------------------------------------------------------------------
 
 
-def test_is_not_junk_unknown_extension():
+def test_is_not_aside_unknown_extension():
     # .xyz is not a video extension and not a known sidecar — should not be junk
-    assert not is_junk(Path("sample.xyz"))
+    assert not is_aside(Path("sample.xyz"))
 
 
 # ---------------------------------------------------------------------------
-# is_junk — parent directory name detection
+# is_aside — parent directory name detection
 # ---------------------------------------------------------------------------
 
 
@@ -154,113 +165,114 @@ def test_is_not_junk_unknown_extension():
         "Specials",
     ],
 )
-def test_junk_by_parent_dir(tmp_path, parent):
-    junk_dir = tmp_path / parent
-    junk_dir.mkdir()
-    f = junk_dir / "something.mkv"
-    assert is_junk(f)
+def test_aside_by_parent_dir(tmp_path, parent):
+    aside_dir = tmp_path / parent
+    aside_dir.mkdir()
+    f = aside_dir / "something.mkv"
+    assert is_aside(f)
 
 
-def test_real_file_in_normal_dir_not_junk(tmp_path):
+def test_real_file_in_normal_dir_not_aside(tmp_path):
     d = tmp_path / "Futurama Season 12"
     d.mkdir()
     f = d / "Futurama.S12E01.mkv"
-    assert not is_junk(f)
+    assert not is_aside(f)
 
 
-def test_junk_nested_deep(tmp_path):
+def test_aside_nested_deep(tmp_path):
     """File deep inside a Featurettes folder is caught regardless of nesting."""
     nested = tmp_path / "Movie (2009)" / "Featurettes" / "The Movie" / "Fake Endings"
     nested.mkdir(parents=True)
     f = nested / "Zombie Meat.mkv"
-    assert is_junk(f)
+    assert is_aside(f)
 
 
 # ---------------------------------------------------------------------------
-# find_junk
+# find_aside
 # ---------------------------------------------------------------------------
 
 
-def test_find_junk_returns_junk_files(tmp_path):
+def test_find_aside_returns_aside_files(tmp_path):
     (tmp_path / "Movie.mkv").touch()
     (tmp_path / "Sample.mkv").touch()
     (tmp_path / "cover.jpg").touch()
     (tmp_path / "release.nfo").touch()
 
-    result = find_junk(tmp_path)
-    names = {p.name for p in result}
+    result = find_aside(tmp_path)
+    names = {p.name for p, _kind in result}
     assert names == {"Sample.mkv", "cover.jpg", "release.nfo"}
 
 
-def test_find_junk_recurses_subdirectories(tmp_path):
+def test_find_aside_recurses_subdirectories(tmp_path):
     subdir = tmp_path / "disc1"
     subdir.mkdir()
     (subdir / "8fa41b40995c44c9a883b1e0fe62f16a.mkv").touch()
     (subdir / "Movie.mkv").touch()
 
-    result = find_junk(tmp_path)
+    result = find_aside(tmp_path)
     assert len(result) == 1
-    assert result[0].name == "8fa41b40995c44c9a883b1e0fe62f16a.mkv"
+    assert result[0][0].name == "8fa41b40995c44c9a883b1e0fe62f16a.mkv"
 
 
-def test_find_junk_empty_directory(tmp_path):
-    assert find_junk(tmp_path) == []
+def test_find_aside_empty_directory(tmp_path):
+    assert find_aside(tmp_path) == []
 
 
-def test_find_junk_no_junk_in_clean_directory(tmp_path):
+def test_find_aside_no_aside_in_clean_directory(tmp_path):
     (tmp_path / "Blade.Runner.2049.mkv").touch()
     (tmp_path / "Futurama.S01E01.mkv").touch()
-    assert find_junk(tmp_path) == []
+    assert find_aside(tmp_path) == []
 
 
-def test_find_junk_returns_sorted(tmp_path):
+def test_find_aside_returns_sorted_by_path(tmp_path):
     (tmp_path / "zzz.nfo").touch()
     (tmp_path / "aaa.nfo").touch()
     (tmp_path / "mmm.nfo").touch()
 
-    result = find_junk(tmp_path)
-    assert result == sorted(result)
+    result = find_aside(tmp_path)
+    paths = [p for p, _ in result]
+    assert paths == sorted(paths)
 
 
 # ---------------------------------------------------------------------------
-# junk_destination
+# aside_destination
 # ---------------------------------------------------------------------------
 
 
-def test_junk_destination_flat(tmp_path):
+def test_aside_destination_flat(tmp_path):
     source_root = tmp_path / "source"
     dest_root = tmp_path / "dest"
     file = source_root / "Sample.mkv"
 
-    result = junk_destination(file, source_root, dest_root)
-    assert result == dest_root / ".junk" / "Sample.mkv"
+    result = aside_destination(file, source_root, dest_root)
+    assert result == dest_root / ".aside" / "Sample.mkv"
 
 
-def test_junk_destination_preserves_subdir(tmp_path):
+def test_aside_destination_preserves_subdir(tmp_path):
     source_root = tmp_path / "source"
     dest_root = tmp_path / "dest"
     file = source_root / "SomeMovie" / "Sample.mkv"
 
-    result = junk_destination(file, source_root, dest_root)
-    assert result == dest_root / ".junk" / "SomeMovie" / "Sample.mkv"
+    result = aside_destination(file, source_root, dest_root)
+    assert result == dest_root / ".aside" / "SomeMovie" / "Sample.mkv"
 
 
-def test_junk_destination_file_outside_source(tmp_path):
+def test_aside_destination_file_outside_source(tmp_path):
     source_root = tmp_path / "source"
     dest_root = tmp_path / "dest"
     file = tmp_path / "elsewhere" / "RARBG.com.mp4"
 
     # Falls back to filename only when file is outside source_root
-    result = junk_destination(file, source_root, dest_root)
-    assert result == dest_root / ".junk" / "RARBG.com.mp4"
+    result = aside_destination(file, source_root, dest_root)
+    assert result == dest_root / ".aside" / "RARBG.com.mp4"
 
 
 # ---------------------------------------------------------------------------
-# move_junk
+# move_aside
 # ---------------------------------------------------------------------------
 
 
-def test_move_junk_moves_files(tmp_path):
+def test_move_aside_moves_files(tmp_path):
     source = tmp_path / "source"
     dest = tmp_path / "dest"
     source.mkdir()
@@ -271,17 +283,17 @@ def test_move_junk_moves_files(tmp_path):
     f1.touch()
     f2.touch()
 
-    moved, failed = move_junk([f1, f2], source, dest)
+    moved, failed = move_aside([f1, f2], source, dest)
 
     assert moved == 2
     assert failed == 0
     assert not f1.exists()
     assert not f2.exists()
-    assert (dest / ".junk" / "Sample.mkv").exists()
-    assert (dest / ".junk" / "cover.jpg").exists()
+    assert (dest / ".aside" / "Sample.mkv").exists()
+    assert (dest / ".aside" / "cover.jpg").exists()
 
 
-def test_move_junk_preserves_subdirectory_structure(tmp_path):
+def test_move_aside_preserves_subdirectory_structure(tmp_path):
     source = tmp_path / "source"
     dest = tmp_path / "dest"
     subdir = source / "SomeMovie"
@@ -291,26 +303,26 @@ def test_move_junk_preserves_subdirectory_structure(tmp_path):
     f = subdir / "Trailer.mkv"
     f.touch()
 
-    move_junk([f], source, dest)
+    move_aside([f], source, dest)
 
-    assert (dest / ".junk" / "SomeMovie" / "Trailer.mkv").exists()
+    assert (dest / ".aside" / "SomeMovie" / "Trailer.mkv").exists()
     assert not f.exists()
 
 
-def test_move_junk_counts_failures(tmp_path):
+def test_move_aside_counts_failures(tmp_path):
     source = tmp_path / "source"
     dest = tmp_path / "dest"
     source.mkdir()
     dest.mkdir()
     missing = source / "nonexistent.mkv"
 
-    moved, failed = move_junk([missing], source, dest)
+    moved, failed = move_aside([missing], source, dest)
 
     assert moved == 0
     assert failed == 1
 
 
-def test_move_junk_partial_success(tmp_path):
+def test_move_aside_partial_success(tmp_path):
     source = tmp_path / "source"
     dest = tmp_path / "dest"
     source.mkdir()
@@ -320,27 +332,27 @@ def test_move_junk_partial_success(tmp_path):
     real.touch()
     missing = source / "ghost.nfo"
 
-    moved, failed = move_junk([real, missing], source, dest)
+    moved, failed = move_aside([real, missing], source, dest)
 
     assert moved == 1
     assert failed == 1
     assert not real.exists()
-    assert (dest / ".junk" / "Sample.mkv").exists()
+    assert (dest / ".aside" / "Sample.mkv").exists()
 
 
-def test_move_junk_empty_list(tmp_path):
-    moved, failed = move_junk([], tmp_path / "source", tmp_path / "dest")
+def test_move_aside_empty_list(tmp_path):
+    moved, failed = move_aside([], tmp_path / "source", tmp_path / "dest")
     assert moved == 0
     assert failed == 0
 
 
 # ---------------------------------------------------------------------------
-# report_junk
+# report_aside
 # ---------------------------------------------------------------------------
 
 
 def test_report_junk_empty_list(tmp_path, capsys):
-    report_junk([], tmp_path / "source", tmp_path / "dest", dry_run=True)
+    report_aside([], tmp_path / "source", tmp_path / "dest", dry_run=True)
     # Should not raise — Rich output goes to its own console, no assertion needed
 
 
@@ -349,14 +361,14 @@ def test_report_junk_dry_run(tmp_path):
     dest = tmp_path / "dest"
     files = [source / "Sample.mkv", source / "cover.jpg"]
     # Should not raise
-    report_junk(files, source, dest, dry_run=True)
+    report_aside(files, source, dest, dry_run=True)
 
 
 def test_report_junk_live(tmp_path):
     source = tmp_path / "source"
     dest = tmp_path / "dest"
     files = [source / "Sample.mkv"]
-    report_junk(files, source, dest, dry_run=False)
+    report_aside(files, source, dest, dry_run=False)
 
 
 # ---------------------------------------------------------------------------
@@ -364,46 +376,81 @@ def test_report_junk_live(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_junk_ncop_anime_opening(tmp_path):
+def test_aside_ncop_anime_opening(tmp_path):
     """[Coalgirls]_Ao_no_Exorcist_NCOP_(...) — Non-Credit Opening."""
     f = tmp_path / "[Coalgirls]_Ao_no_Exorcist_NCOP_(1920x1080_Blu-Ray_FLAC)_[E92D4C42].mkv"
     f.touch()
-    assert is_junk(f)
+    assert is_aside(f)
 
 
-def test_junk_nced_anime_ending(tmp_path):
+def test_aside_nced_anime_ending(tmp_path):
     """[Coalgirls]_Ao_no_Exorcist_NCED_(...) — Non-Credit Ending."""
     f = tmp_path / "[Coalgirls]_Ao_no_Exorcist_NCED_(1920x1080_Blu-Ray_FLAC)_[00518C15].mkv"
     f.touch()
-    assert is_junk(f)
+    assert is_aside(f)
 
 
-def test_junk_nced2_numbered_ending(tmp_path):
+def test_aside_nced2_numbered_ending(tmp_path):
     """NCED2 — second ending track, also junk."""
     f = tmp_path / "[Coalgirls]_Ao_no_Exorcist_NCED2_(1920x1080_Blu-Ray_FLAC)_[3E5D24F0].mkv"
     f.touch()
-    assert is_junk(f)
+    assert is_aside(f)
 
 
-def test_junk_creditless_op_anime(tmp_path):
+def test_ncop_classified_as_anime_op_ed_not_discard(tmp_path):
+    """NCOP files are bonus content, not garbage — preserved to extras/op-ed/."""
+    from jellyfiler.aside import AsideKind, classify_aside
+
+    f = tmp_path / "[Coalgirls]_Ao_no_Exorcist_NCOP_(1920x1080_Blu-Ray_FLAC)_[E92D4C42].mkv"
+    f.touch()
+    assert classify_aside(f) == AsideKind.ANIME_OP_ED
+
+
+def test_creditless_op_classified_as_anime_op_ed(tmp_path):
+    from jellyfiler.aside import AsideKind, classify_aside
+
+    f = tmp_path / "Fate_Stay_Night_Creditless_OP1_[720p,BluRay,x264]_-_THORA.mkv"
+    f.touch()
+    assert classify_aside(f) == AsideKind.ANIME_OP_ED
+
+
+def test_op_dir_classified_as_anime_op_ed(tmp_path):
+    """A folder literally named OP/, ED/, Openings/, Endings/ → ANIME_OP_ED."""
+    from jellyfiler.aside import AsideKind, classify_aside
+
+    op_dir = tmp_path / "OP"
+    op_dir.mkdir()
+    f = op_dir / "show_op.mkv"
+    f.touch()
+    assert classify_aside(f) == AsideKind.ANIME_OP_ED
+
+
+def test_anime_op_ed_routes_to_extras_op_ed_subfolder():
+    """The Jellyfin destination is extras/op-ed (two-level path under the show)."""
+    from jellyfiler.aside import JELLYFIN_EXTRAS_SUBDIR, AsideKind
+
+    assert JELLYFIN_EXTRAS_SUBDIR[AsideKind.ANIME_OP_ED] == "extras/op-ed"
+
+
+def test_aside_creditless_op_anime(tmp_path):
     """Creditless_OP1 — alternative spelling for non-credit opening."""
     f = tmp_path / "Fate_Stay_Night_Creditless_OP1_[720p,BluRay,x264]_-_THORA.mkv"
     f.touch()
-    assert is_junk(f)
+    assert is_aside(f)
 
 
-def test_junk_creditless_op2(tmp_path):
+def test_aside_creditless_op2(tmp_path):
     """Creditless_OP2 — numbered creditless opening."""
     f = tmp_path / "Fate_Stay_Night_Creditless_OP2_[720p,BluRay,x264]_-_THORA.mkv"
     f.touch()
-    assert is_junk(f)
+    assert is_aside(f)
 
 
 def test_ova_files_are_NOT_junked(tmp_path):
     """OVAs are legitimate content (Jellyfin treats them as S00 specials) — must NOT be junked."""
     f = tmp_path / "[Cerberus] KonoSuba OVA - 01 [BD 1080p].mkv"
     f.touch()
-    assert not is_junk(f)
+    assert not is_aside(f)
 
 
 def test_ova_subdirectory_is_NOT_junked(tmp_path):
@@ -412,34 +459,34 @@ def test_ova_subdirectory_is_NOT_junked(tmp_path):
     sub.mkdir()
     f = sub / "Show.S00E01.mkv"
     f.touch()
-    assert not is_junk(f)
+    assert not is_aside(f)
 
 
-def test_junk_openings_directory(tmp_path):
+def test_aside_openings_directory(tmp_path):
     """Openings/ folder is junk."""
     sub = tmp_path / "Openings"
     sub.mkdir()
     f = sub / "Opening 1.mkv"
     f.touch()
-    assert is_junk(f)
+    assert is_aside(f)
 
 
 def test_normal_episode_with_operation_in_title_is_not_junk(tmp_path):
     """'Operation Ruthless' contains 'OP' but isn't an opening — must NOT match."""
     f = tmp_path / "Hey Arnold S01E07a Operation Ruthless.mkv"
     f.touch()
-    assert not is_junk(f)
+    assert not is_aside(f)
 
 
 def test_normal_episode_with_ending_in_title_is_not_junk(tmp_path):
     """'Endings Are Always...' is an episode title, not a creditless ending."""
     f = tmp_path / "[OZC]Planetes E19 'Endings Are Always...'.mkv"
     f.touch()
-    assert not is_junk(f)
+    assert not is_aside(f)
 
 
 def test_eden_does_not_match_ed_token(tmp_path):
     """Standalone 'ED' must require word boundary — 'Eden' shouldn't trigger."""
     f = tmp_path / "Garden of Eden S01E05.mkv"
     f.touch()
-    assert not is_junk(f)
+    assert not is_aside(f)
