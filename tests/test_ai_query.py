@@ -336,3 +336,69 @@ def test_use_ai_flag_true_calls_suggest_search(tmp_path: Path):
         )
 
     mock_suggest.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Branches that don't depend on the anthropic client
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_check_returns_false_when_anthropic_unavailable():
+    """Lines 13-16 + 33: simulates `import anthropic` failing at module load."""
+    with patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", False):
+        assert preflight_check("any-key") is False
+
+
+def test_suggest_search_returns_none_when_anthropic_unavailable():
+    """Same import-failure branch in suggest_search."""
+    with patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", False):
+        assert suggest_search("dir", "file.mkv", "any-key", is_tv=False) is None
+
+
+def test_preflight_check_handles_non_text_block():
+    """Line 43: API returns a non-TextBlock content block (e.g. tool use) → False."""
+    msg = MagicMock()
+    msg.content = ["not-a-text-block"]  # bare string, not anthropic.types.TextBlock
+    mock_module = MagicMock()
+    mock_module.Anthropic.return_value.messages.create.return_value = msg
+
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock_module),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        assert preflight_check("fake-key") is False
+
+
+def test_preflight_check_returns_false_on_wrong_response_text():
+    """preflight rejects responses that aren't 'true' (covers the False return path)."""
+    mock = _mock_anthropic("false")
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        assert preflight_check("fake-key") is False
+
+
+def test_preflight_check_true_when_response_is_true():
+    """preflight accepts 'true' (and is case-insensitive)."""
+    mock = _mock_anthropic("True")
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        assert preflight_check("fake-key") is True
+
+
+def test_suggest_search_handles_non_text_block():
+    """Line 82: model returns a non-TextBlock content block → None."""
+    msg = MagicMock()
+    msg.content = ["not-a-text-block"]
+    mock_module = MagicMock()
+    mock_module.Anthropic.return_value.messages.create.return_value = msg
+
+    with (
+        patch("jellyfiler.ai_query._anthropic", mock_module),
+        patch("jellyfiler.ai_query._ANTHROPIC_AVAILABLE", True),
+    ):
+        result = suggest_search("dir", "file.mkv", "fake-key", is_tv=False)
+    assert result is None

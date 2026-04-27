@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from jellyfiler.models import GuessedMedia, MediaType, Plan, PlannedMove, TmdbMatch
 from jellyfiler.planner import (
     _episode_destination,
@@ -78,6 +80,20 @@ def test_episode_destination_multi_episode_three():
     )
     dest = _episode_destination(Path("/dest"), match, guessed, Path("Show.S03E01E02E03.mkv"))
     assert dest == Path("/dest/Futurama/Season 03/S03E01-E03.mkv")
+
+
+def test_episode_destination_raises_when_episode_is_none():
+    """Defensive: callers must resolve episode before calling _episode_destination directly."""
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("orphan.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=1,
+        episode=None,
+    )
+    with pytest.raises(ValueError, match="episode number is unknown"):
+        _episode_destination(Path("/dest"), match, guessed, Path("orphan.mkv"))
 
 
 def test_episode_destination_pads_single_digit():
