@@ -55,6 +55,7 @@ from jellyfiler.interactive import (
     prompt_manual_title,
     prompt_tmdb_match,
 )
+from jellyfiler.jsonlog import NullLogger, open_logger
 from jellyfiler.junk import is_junk, move_junk, report_junk
 from jellyfiler.models import GuessedMedia, MediaType, Plan, PlannedMove
 from jellyfiler.planner import build_plan, plan_move
@@ -221,6 +222,7 @@ class OrganizeContext:
     force: bool
     ai_disabled: bool = False  # toggled to True if the user opts out mid-run
     parallel: int = 1
+    logger: NullLogger = field(default_factory=NullLogger)
 
 
 @dataclass
@@ -556,12 +558,14 @@ def _classify_file(
     if not ctx.force and ctx.cache.already_moved(file):
         if not ctx.quiet:
             console.print(f"[dim]SKIP (cached):[/dim] {file.name}")
+        ctx.logger.debug("classify_cached", file=file)
         return ClassifiedFile(file=file, kind="cached")
 
     # 2. Junk filter
     if is_junk(file):
         if not ctx.quiet:
             console.print(f"[dim]JUNK:[/dim] {file.name}")
+        ctx.logger.info("classify_junk", file=file)
         return ClassifiedFile(file=file, kind="junk")
 
     # 3. Guess
@@ -629,6 +633,14 @@ def _classify_file(
     if pinned:
         if not ctx.quiet:
             console.print(f"[dim]PINNED:[/dim] {guessed.title} → {pinned.title} ({pinned.year})")
+        ctx.logger.info(
+            "classify_pinned",
+            file=file,
+            guessed_title=guessed.title,
+            tmdb_id=pinned.tmdb_id,
+            tmdb_title=pinned.title,
+            tmdb_year=pinned.year,
+        )
         return ClassifiedFile(
             file=file,
             kind="pinned",
@@ -637,6 +649,7 @@ def _classify_file(
         )
 
     # 7. Needs the TMDB lookup chain
+    ctx.logger.debug("classify_needs_lookup", file=file, guessed_title=guessed.title)
     return ClassifiedFile(file=file, kind="needs_lookup", guessed=guessed)
 
 
@@ -721,6 +734,23 @@ def _finalize_after_lookup(
     move = plan_move(guessed, match, ctx.dest, file, rich_names=ctx.rich_names)
     if match:
         ctx.cache.set_pinned(lookup.search_title, cache_year, guessed.media_type, match)
+        ctx.logger.info(
+            "match_resolved",
+            file=file,
+            search_title=lookup.search_title,
+            tmdb_id=match.tmdb_id,
+            tmdb_title=match.title,
+            tmdb_year=match.year,
+            confidence=move.confidence,
+            pinned=True,
+        )
+    elif move.skipped:
+        ctx.logger.warning(
+            "match_skipped",
+            file=file,
+            guessed_title=guessed.title,
+            reason=move.skip_reason,
+        )
     return FileResult(kind="planned", move=move)
 
 
@@ -1205,6 +1235,29 @@ def organize(
             ),
         ),
     ] = 40,
+    full_plan: Annotated[
+        bool,
+        typer.Option(
+            "--full-plan",
+            help=(
+                "Print every row of the move/skip plan. By default the table "
+                "truncates after 50 rows so terminals stay usable on libraries "
+                "with thousands of files."
+            ),
+        ),
+    ] = False,
+    log_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--log",
+            help=(
+                "Write a structured JSON-lines log of every classification, "
+                "lookup, plan decision, dedupe action, and move to the given "
+                "file path. Append-only; safe under --parallel. Useful for "
+                "later analysis with jq, or post-mortem on a failed run."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Scan SOURCE, match against TMDB, and organize into DEST.
 
@@ -1250,6 +1303,19 @@ def organize(
         console.print(f"[dim]Cache: {cache_db}[/dim]\n")
 
     cache = Cache(cache_db)
+    logger = open_logger(log_path)
+    logger.info(
+        "run_started",
+        command="organize",
+        source=source,
+        dest=dest,
+        dry_run=dry_run,
+        parallel=parallel,
+        interactive=interactive,
+        use_ai=use_ai,
+        rich_names=rich_names,
+        file_count=len(files),
+    )
     ctx = OrganizeContext(
         source=source,
         dest=dest,
@@ -1262,6 +1328,7 @@ def organize(
         quiet=quiet,
         force=force,
         parallel=parallel,
+        logger=logger,
     )
 
     pipeline = _run_pipeline(files, ctx)
@@ -1277,6 +1344,11 @@ def organize(
             "skipping both files in each pair. Use 'jellyfiler dedupe' to resolve.[/yellow]"
         )
     if duplicate_groups:
+        logger.warning(
+            "duplicate_groups_detected",
+            group_count=len(duplicate_groups),
+            action="skipped",
+        )
         plan, _del, _quar, _dirs = _resolve_dedupe(
             plan,
             interactive=False,  # force skip-both behavior in organize
@@ -1287,9 +1359,17 @@ def organize(
         )
 
     try:
-        execute(plan, dry_run=dry_run, cache=cache, source_root=source)
+        execute(
+            plan,
+            dry_run=dry_run,
+            cache=cache,
+            source_root=source,
+            full_plan=full_plan,
+        )
     except ExecutionError as exc:
         err_console.print(f"\n[bold red]{exc}[/bold red]")
+        logger.error("execute_failed", error=str(exc))
+        logger.close()
         raise typer.Exit(1) from exc
 
     _print_summary(
@@ -1300,6 +1380,17 @@ def organize(
         tmdb_errors=pipeline.tmdb_errors,
         dry_run=dry_run,
     )
+    logger.info(
+        "run_finished",
+        command="organize",
+        planned=len(plan.moves),
+        skipped=len(plan.skipped),
+        junk_count=len(pipeline.junk_files),
+        junk_bytes=junk_bytes,
+        tmdb_errors=pipeline.tmdb_errors,
+        dry_run=dry_run,
+    )
+    logger.close()
 
     if pipeline.tmdb_errors:
         err_console.print(
@@ -1372,6 +1463,20 @@ def dedupe(
             ),
         ),
     ] = 40,
+    full_plan: Annotated[
+        bool,
+        typer.Option(
+            "--full-plan",
+            help="Print every row of the move/skip plan (default truncates at 50).",
+        ),
+    ] = False,
+    log_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--log",
+            help="Write a JSON-lines event log to the given path (matching, dedupe, deletions).",
+        ),
+    ] = None,
 ) -> None:
     """Find and resolve duplicate-destination files in SOURCE.
 
@@ -1401,6 +1506,19 @@ def dedupe(
         raise typer.Exit(0)
 
     cache = Cache(cache_db)
+    logger = open_logger(log_path)
+    logger.info(
+        "run_started",
+        command="dedupe",
+        source=source,
+        dest=dest,
+        dry_run=dry_run,
+        parallel=parallel,
+        interactive=interactive,
+        quarantine_duplicates=quarantine_duplicates,
+        remove_duplicates=remove_duplicates,
+        file_count=len(files),
+    )
     ctx = OrganizeContext(
         source=source,
         dest=dest,
@@ -1413,6 +1531,7 @@ def dedupe(
         quiet=quiet,
         force=True,  # in dedupe we don't skip already-moved files (we want to find dupes)
         parallel=parallel,
+        logger=logger,
     )
 
     pipeline = _run_pipeline(files, ctx)
@@ -1430,6 +1549,8 @@ def dedupe(
     if not (losers_to_delete or losers_to_quarantine):
         if not quiet:
             console.print("[green]No duplicates to resolve.[/green]")
+        logger.info("dedupe_no_duplicates")
+        logger.close()
         raise typer.Exit(0)
 
     if dry_run:
@@ -1437,7 +1558,22 @@ def dedupe(
             f"\n[bold cyan]DRY RUN[/bold cyan] — pass --apply to actually delete/quarantine. "
             f"Would resolve {len(losers_to_delete) + len(losers_to_quarantine)} loser(s)."
         )
+        logger.info(
+            "dedupe_planned",
+            to_delete=len(losers_to_delete),
+            to_quarantine=len(losers_to_quarantine),
+            dirs_to_remove=len(dirs_to_remove),
+            dry_run=True,
+        )
+        logger.close()
         raise typer.Exit(0)
+
+    for loser in losers_to_delete:
+        logger.warning("dedupe_will_delete", file=loser.source)
+    for loser in losers_to_quarantine:
+        logger.info("dedupe_will_quarantine", file=loser.source)
+    for d in dirs_to_remove:
+        logger.warning("dedupe_will_rmtree", path=d)
 
     _apply_dedupe_actions(losers_to_delete, losers_to_quarantine, dirs_to_remove, source, dest)
     if not quiet:
@@ -1445,6 +1581,14 @@ def dedupe(
             f"\n[bold green]Done.[/bold green] "
             f"Resolved {len(losers_to_delete) + len(losers_to_quarantine)} duplicate(s)."
         )
+    logger.info(
+        "run_finished",
+        command="dedupe",
+        deleted=len(losers_to_delete),
+        quarantined=len(losers_to_quarantine),
+        dirs_removed=len(dirs_to_remove),
+    )
+    logger.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

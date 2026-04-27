@@ -69,6 +69,20 @@ The progress bar gains a live `⚙ <active>/<max>` column during phase 2 so you 
 
 Output ordering is preserved — phase 3 walks classifications in input order, even though phase 2 completes futures out of order. The AI-disable interactive prompt is suppressed in parallel mode (worker threads can't share stdin); AI errors abort the run instead.
 
+### Truncated plan output (`--full-plan` to opt out)
+On a library with thousands of files, the move/skip table would otherwise be unusable. By default each section caps at 50 rows with a `… and N more` footer. Pass `--full-plan` to dump everything (e.g. when piping to `less`).
+
+### Structured event log (`--log <path>`)
+Append-only JSON-lines log of every classification, lookup, plan decision, dedupe action, and move:
+
+```bash
+uv run jellyfiler organize /source /dest --log run.jsonl --apply
+jq 'select(.event == "match_skipped")' run.jsonl | head
+jq 'select(.level == "error")' run.jsonl
+```
+
+One event per line. Fields include `ts` (UTC ISO-8601), `level` (debug/info/warning/error), `event` name, plus event-specific fields like `file`, `tmdb_id`, `confidence`, `reason`. Writes are thread-safe under `--parallel`. Events emitted: `run_started`, `classify_cached`, `classify_junk`, `classify_pinned`, `match_resolved`, `match_skipped`, `duplicate_groups_detected`, `dedupe_will_delete`, `dedupe_will_quarantine`, `run_finished`.
+
 ### Subtitle sidecars
 After each video move, subtitle files sharing the same stem (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`, `.sup`) are moved alongside and renamed to match the destination. Language codes are preserved: `episode.en.srt` → `S01E05.en.srt`.
 
