@@ -453,7 +453,7 @@ def test_quarantine_path_preserves_relative(tmp_path):
     loser_src = src_root / "Show" / "ep.720p.mkv"
     loser = _move(loser_src, dst_root / "Show/S01E01.mkv")
     qpath = quarantine_path(loser, src_root, dst_root)
-    assert qpath == dst_root / ".junk" / "duplicates" / "Show" / "ep.720p.mkv"
+    assert qpath == dst_root / ".aside" / "duplicates" / "Show" / "ep.720p.mkv"
 
 
 def test_quarantine_path_falls_back_when_outside_source(tmp_path):
@@ -463,7 +463,7 @@ def test_quarantine_path_falls_back_when_outside_source(tmp_path):
     loser = _move(loser_src, dst_root / "Show/S01E01.mkv")
     qpath = quarantine_path(loser, src_root, dst_root)
     # Falls back to bare filename when the loser isn't under source_root.
-    assert qpath == dst_root / ".junk" / "duplicates" / "ep.mkv"
+    assert qpath == dst_root / ".aside" / "duplicates" / "ep.mkv"
 
 
 # ---------------------------------------------------------------------------

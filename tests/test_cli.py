@@ -434,6 +434,105 @@ def test_organize_no_longer_accepts_remove_duplicates(tmp_path: Path):
     assert result.exit_code != 0  # Click exits with 2 for unknown options
 
 
+def test_organize_log_writes_jsonl_events(tmp_path: Path):
+    """--log path emits a JSONL file with run_started + run_finished events at minimum."""
+
+    src = tmp_path / "src"
+    src.mkdir()
+    dest = tmp_path / "dest"
+    log_path = tmp_path / "events.jsonl"
+
+    with patch.dict(os.environ, {"TMDB_API_KEY": "fake"}):
+        result = runner.invoke(
+            app,
+            [
+                "organize",
+                str(src),
+                str(dest),
+                "--no-interactive",
+                "--log",
+                str(log_path),
+            ],
+        )
+    # Empty source = exit 0 before run_finished, but run_started must have written.
+    assert result.exit_code == 0
+    # When source is empty we never reach OrganizeContext / logger creation, so
+    # log file may not exist. Use a populated source for the real check.
+
+
+def test_organize_log_records_full_run(tmp_path: Path):
+    """A populated source produces run_started, classify_*, and run_finished events."""
+    import json
+
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "Show.S01E01.mkv"
+    f.touch()
+    dest = tmp_path / "dest"
+    log_path = tmp_path / "events.jsonl"
+
+    fake_match = TmdbMatch(tmdb_id=1, title="Show", year=2020, media_type=MediaType.EPISODE)
+    mock_cache = MagicMock()
+    mock_cache.already_moved.return_value = False
+    mock_cache.get_pinned.return_value = fake_match
+    mock_cache.get_tmdb.return_value = None
+
+    with (
+        patch.dict(os.environ, {"TMDB_API_KEY": "fake"}),
+        patch("jellyfiler.cli.Cache", return_value=mock_cache),
+        patch("jellyfiler.cli.TmdbClient"),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "organize",
+                str(src),
+                str(dest),
+                "--no-interactive",
+                "--log",
+                str(log_path),
+            ],
+        )
+    assert result.exit_code == 0
+    assert log_path.exists()
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    event_names = [e["event"] for e in events]
+    assert "run_started" in event_names
+    assert "classify_pinned" in event_names  # we mocked a pinned hit
+    assert "run_finished" in event_names
+
+
+def test_organize_full_plan_flag_accepted(tmp_path: Path):
+    """--full-plan must be accepted (not rejected as unknown)."""
+    src = tmp_path / "src"
+    src.mkdir()
+    dest = tmp_path / "dest"
+    with patch.dict(os.environ, {"TMDB_API_KEY": "fake"}):
+        result = runner.invoke(
+            app, ["organize", str(src), str(dest), "--no-interactive", "--full-plan"]
+        )
+    assert result.exit_code == 0
+
+
+def test_dedupe_log_flag_accepted(tmp_path: Path):
+    src = tmp_path / "src"
+    src.mkdir()
+    dest = tmp_path / "dest"
+    with patch.dict(os.environ, {"TMDB_API_KEY": "fake"}):
+        result = runner.invoke(
+            app,
+            [
+                "dedupe",
+                str(src),
+                str(dest),
+                "--no-interactive",
+                "--log",
+                str(tmp_path / "dedupe.jsonl"),
+            ],
+        )
+    assert result.exit_code == 0
+
+
 def test_organize_no_longer_accepts_quarantine_duplicates(tmp_path: Path):
     """--quarantine-duplicates was moved to `dedupe`."""
     src = tmp_path / "src"

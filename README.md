@@ -49,7 +49,7 @@ uv run jellyfiler dedupe /source /dest --remove-duplicates --i-mean-it --apply
 |---|---|---|
 | (none) interactive | Prompts per duplicate pair. Shows path + resolution + size for each candidate. Options: keep one, skip both, sticky "always highest", sticky "always highest + quarantine losers", **one-shot "delete losers + their parent dir"**. | Per choice |
 | (none) `--no-interactive` | Skip both files in every duplicate pair. Safe default for unattended runs. | Yes |
-| `--quarantine-duplicates` | Auto-keep highest quality, move losers to `dest/.junk/duplicates/`. Single flag — no extra confirmation since it's reversible. Cron-friendly. | Yes |
+| `--quarantine-duplicates` | Auto-keep highest quality, move losers to `dest/.aside/duplicates/`. Single flag — no extra confirmation since it's reversible. Cron-friendly. | Yes |
 | `--remove-duplicates --i-mean-it` | Auto-keep highest quality, **PERMANENTLY DELETE** losers. The double-flag protects against accidents in cron jobs. | **No** |
 
 Quality ranking: filename resolution tag (2160p > 1080p > 720p > 480p) is the primary key, file size on disk is the tiebreaker.
@@ -68,13 +68,27 @@ uv run jellyfiler organize /source /dest -j 1 --apply         # sequential (debu
 ```
 
 Three-phase pipeline:
-1. **Classify** — sequential, fast: cache check, junk filter, guessit parse, pinned-cache lookup. Interactive "missing title" prompt fires here if needed.
+1. **Classify** — sequential, fast: cache check, aside filter (extras/samples/etc.), guessit parse, pinned-cache lookup. Interactive "missing title" prompt fires here if needed.
 2. **Lookup** — parallel: TMDB → variant retries → AniList → AI fallback chain runs across N threads. The rate limiter is a global token bucket so all workers share the budget.
 3. **Finalize** — sequential, on the main thread: ambiguous-match prompt, bare-episode prompt, plan + pin.
 
 The progress bar gains a live `⚙ <active>/<max>` column during phase 2 so you can see whether the pool is saturated (active = max) or starving (active << max, usually means TMDB is responding fast and the rate limiter is the bottleneck — exactly what we want).
 
 Output ordering is preserved — phase 3 walks classifications in input order, even though phase 2 completes futures out of order. The AI-disable interactive prompt is suppressed in parallel mode (worker threads can't share stdin); AI errors abort the run instead.
+
+### Truncated plan output (`--full-plan` to opt out)
+On a library with thousands of files, the move/skip table would otherwise be unusable. By default each section caps at 50 rows with a `… and N more` footer. Pass `--full-plan` to dump everything (e.g. when piping to `less`).
+
+### Structured event log (`--log <path>`)
+Append-only JSON-lines log of every classification, lookup, plan decision, dedupe action, and move:
+
+```bash
+uv run jellyfiler organize /source /dest --log run.jsonl --apply
+jq 'select(.event == "match_skipped")' run.jsonl | head
+jq 'select(.level == "error")' run.jsonl
+```
+
+One event per line. Fields include `ts` (UTC ISO-8601), `level` (debug/info/warning/error), `event` name, plus event-specific fields like `file`, `tmdb_id`, `confidence`, `reason`. Writes are thread-safe under `--parallel`. Events emitted: `run_started`, `classify_cached`, `classify_aside` (with `aside_kind`), `classify_pinned`, `match_resolved`, `match_skipped`, `duplicate_groups_detected`, `dedupe_will_delete`, `dedupe_will_quarantine`, `aside_jellyfin_extras`, `aside_aside_pile`, `aside_discarded`, `run_finished`.
 
 ### Subtitle sidecars
 After each video move, subtitle files sharing the same stem (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`, `.sup`) are moved alongside and renamed to match the destination. Language codes are preserved: `episode.en.srt` → `S01E05.en.srt`.
@@ -95,14 +109,37 @@ Battle-tested against ~350 real release names from a messy SMB library. The pars
 - **Year-range season folders**: `Season 1 (1994-95)` doesn't leak `year=1994` into the search
 - **Anime intro/outro tracks**: `NCOP`, `NCED`, `Creditless_OP1`, `Non-Credit Ending` → quarantined as junk (never canonical episodes), but episode titles like "Endings Are Always..." or "Operation Ruthless" are NOT misclassified.
 
-### Claude Haiku AI search fallback
-When TMDB title-variant retries **and** the AniList anime fallback both miss, pass `--use-ai` to send the raw release directory and filename to `claude-haiku-4-5` for a clean search query. Requires `ANTHROPIC_API_KEY` — the flag is always opt-in so tokens are never spent without explicit intent. AniList runs first, so anime titles only reach the paid AI fallback when AniList itself can't find them.
+### Claude Haiku AI fallbacks (`--use-ai`)
+A single opt-in flag drives **two** Haiku-backed fallbacks. Both fire only when the cheap pattern/regex/TMDB chain has already exhausted itself, both cache aggressively, and both swallow network errors so a transient failure doesn't abort the run.
 
-Before scanning any files, `--use-ai` runs a preflight check: it verifies the key is set and that Haiku responds correctly. If either fails, the run aborts immediately with a clear error.
+**1. TMDB search query suggestion** — when TMDB title-variant retries **and** the AniList anime fallback both miss, the raw release directory + filename go to Haiku for a clean search query. AniList runs first, so anime titles only reach the paid AI fallback when AniList itself can't find them.
 
-API errors during a run (bad key, quota, network) stop the run in `--no-interactive` mode. In interactive mode you are prompted to disable AI and continue without it.
+**2. Aside (extras) classification** — when pattern-based `classify_aside` misses an unfamiliar parent dir name (`Bonusy/` Polish, `Doplnki/` Czech, ad-hoc `Bonus-Materials/`, etc.) **and** TMDB can't match it as main media, Haiku reads parent-dir + filename together and picks one of the Jellyfin extras kinds (`FEATURETTES`, `DELETED_SCENES`, `INTERVIEWS`, …) or returns `MAIN_MEDIA` to fall through to the normal skip. Cached per `(parent_dir, filename)`, so a release group's quirky naming pattern is classified once and free thereafter.
 
-The prompt is a single system instruction + the two raw strings, keeping token usage minimal across large libraries.
+Concrete example:
+
+```
+source/Avatar (2009)/
+  Avatar.2009.1080p.mkv
+  Bonusy/                         ← unrecognised dir name
+    making-of-pandora.mkv
+    director-interview.mkv
+```
+
+After `organize --use-ai --apply`:
+
+```
+dest/Avatar (2009)/
+  Avatar (2009).mkv
+  featurettes/making-of-pandora.mkv  ← Haiku → FEATURETTES
+  interviews/director-interview.mkv  ← Haiku → INTERVIEWS
+```
+
+**Operational notes:**
+- Requires `ANTHROPIC_API_KEY`; the flag is always opt-in so tokens are never spent without explicit intent.
+- Runs a preflight check at startup — if the key is invalid, the run aborts before any file work.
+- API errors mid-run (bad key, quota, network) stop the run in `--no-interactive` mode. In interactive (sequential) mode you're prompted to disable AI and continue.
+- Each call is a single system instruction + two raw strings; token usage stays minimal even on multi-thousand-file libraries.
 
 ---
 
@@ -128,13 +165,21 @@ output/
     Season 12/
       S12E01.mkv
       S12E02.mkv
-  .junk/
+  .aside/
     Futurama.S12.1080p.x265-ELiTE/
       Sample.mkv
       release.nfo
 ```
 
-Junk files (samples, trailers, sidecar files, hash-named files, scene promo videos) are automatically detected and quarantined into a `.junk/` subdirectory in the destination — they never trigger a title-search prompt. The `.junk/` prefix is ignored by Jellyfin.
+**Smart routing of non-canonical content (extras, samples, sidecars):**
+
+* **Jellyfin-recognised extras** — files inside `Featurettes/`, `Behind the Scenes/`, `Deleted Scenes/`, `Interviews/`, `Trailers/`, `Shorts/`, `Bloopers/`, `DVD Extras/`, `Bonus Features/`, `Specials/` or generic `Extras/` are routed into the matching subdirectory of the parent media item (`<Movie> (Year)/featurettes/...`, `<Show>/behind the scenes/...`). Jellyfin then displays them as bonus content alongside the main title.
+* **Anime OP/ED** — non-credit opening/ending tracks (`NCOP`, `NCED`, `Creditless_OP1`, files in `OP/`/`ED/`/`Openings/`/`Endings/` folders) preserve to `<Show>/extras/op-ed/`.
+* **AI fallback for unknown dir names** (`--use-ai`) — pattern-based classification can't enumerate every dir variant (`Bonusy/`, `Doplnki/`, `Bonus-Materials/`, ad-hoc names). When patterns miss AND TMDB can't match as main media, Haiku reads parent-dir + filename together and picks a kind. See the dedicated [Claude Haiku AI fallbacks](#claude-haiku-ai-fallbacks---use-ai) section below for details.
+* **DISCARD content** — samples, hash-named files, RARBG promo videos, and `.nfo`/`.txt`/`.jpg`/etc. sidecars go to `dest/.aside/` by default (recoverable). Pass `--remove-discards --i-mean-it` to **PERMANENTLY DELETE** them instead. Without `--i-mean-it` the run aborts with a big red warning.
+* **Orphan extras** (extras folders with no parent movie/show match) fall back to `dest/.aside/`.
+
+The `.aside/` prefix is dot-prefixed so Jellyfin ignores it during scans.
 
 ---
 
@@ -298,10 +343,12 @@ uv run jellyfiler cache clear --all             # full reset
 - **Nothing is overwritten.** If the destination already exists, the move is skipped.
 - **Pre-flight checks run before the first file is touched.** Missing sources or unresolved problems abort the entire operation with a clear error — no partial moves.
 - **Ambiguous matches are interactively resolved or skipped.** A wrong TMDB match is more dangerous than a skip. The tool defaults to asking rather than guessing wrong.
-- **Junk is quarantined, not discarded.** Sample/trailer/sidecar/`NCOP` files go to `.junk/` in the destination, where they're easy to recover or delete by hand.
-- **Deletion requires explicit double-flag opt-in.** The *only* way the tool ever deletes a file is `--remove-duplicates --i-mean-it`. Either flag alone aborts. The interactive duplicate prompt also has a one-shot **delete** option (`d`) that you must type per group — it's deliberately not sticky.
-
-The interactive **delete-and-remove-parent-dir** option (`d` in the duplicate prompt) and the `--remove-duplicates --i-mean-it` flag pair are the only paths that ever `unlink()` user files. Everything else is a `move` or skip.
+- **DISCARD content goes to `.aside/` by default.** Sample/trailer/sidecar/`NCOP` files quarantine to `dest/.aside/` (recoverable) unless you explicitly opt in to deletion.
+- **Deletion requires explicit double-flag opt-in.** Three paths can `unlink()` user files, all gated:
+  - `--remove-duplicates --i-mean-it` (on `dedupe`) — deletes lower-quality duplicate copies
+  - `--remove-discards --i-mean-it` (on `organize`) — deletes DISCARD-classified files (samples, NCOP/NCED, sidecars, hash-named files)
+  - The interactive duplicate prompt's one-shot **`d`** option — you must type it per group; deliberately not sticky.
+  Each path either prompts or shows a big red warning and aborts unless `--i-mean-it` is set.
 
 ---
 
