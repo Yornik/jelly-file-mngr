@@ -321,8 +321,24 @@ def _planned_move(skipped: bool = False) -> PlannedMove:
     )
 
 
+def _planned_move_to(src: str, dst: str, skipped: bool = False) -> PlannedMove:
+    return PlannedMove(
+        source=Path(src),
+        destination=Path(dst),
+        media_type=MediaType.MOVIE,
+        tmdb_id=1,
+        matched_title="Test",
+        confidence="high",
+        skipped=skipped,
+        skip_reason="reason" if skipped else "",
+    )
+
+
 def test_build_plan_splits_moves_and_skipped():
-    moves = [_planned_move(skipped=False), _planned_move(skipped=False)]
+    moves = [
+        _planned_move_to("a.mkv", "dest/a.mkv"),
+        _planned_move_to("b.mkv", "dest/b.mkv"),
+    ]
     skips = [_planned_move(skipped=True)]
     plan = build_plan(moves + skips)
     assert len(plan.moves) == 2

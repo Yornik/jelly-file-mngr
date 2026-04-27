@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from jellyfiler.ai_query import AiUsage
 from jellyfiler.cli import (
     LookupResult,
     OrganizeContext,
@@ -332,7 +333,7 @@ def test_lookup_chain_ai_fallback_uses_suggestion(tmp_path: Path):
         patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
         patch(
             "jellyfiler.cli.suggest_search",
-            return_value={"title": "Real Show", "year": None},
+            return_value=({"title": "Real Show", "year": None}, AiUsage(0, 0)),
         ),
     ):
         # AI's retry returns the actual match
@@ -1587,7 +1588,7 @@ def test_lookup_chain_ai_retry_exception_swallowed(tmp_path: Path):
         patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
         patch(
             "jellyfiler.cli.suggest_search",
-            return_value={"title": "Real Show", "year": None},
+            return_value=({"title": "Real Show", "year": None}, AiUsage(0, 0)),
         ),
     ):
         out = _lookup_match_chain(g, Path("x.mkv"), ctx)
@@ -1723,7 +1724,7 @@ def test_try_ai_aside_classification_returns_aside_kind(tmp_path: Path):
     f.touch()
     with (
         patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
-        patch("jellyfiler.cli.suggest_aside_kind", return_value="FEATURETTES"),
+        patch("jellyfiler.cli.suggest_aside_kind", return_value=("FEATURETTES", AiUsage(0, 0))),
     ):
         out = _try_ai_aside_classification(f, ctx)
     assert out == AsideKind.FEATURETTES
@@ -1737,7 +1738,7 @@ def test_try_ai_aside_classification_main_media_returns_none(tmp_path: Path):
     f.touch()
     with (
         patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
-        patch("jellyfiler.cli.suggest_aside_kind", return_value="MAIN_MEDIA"),
+        patch("jellyfiler.cli.suggest_aside_kind", return_value=("MAIN_MEDIA", AiUsage(0, 0))),
     ):
         out = _try_ai_aside_classification(f, ctx)
     assert out is None
@@ -1754,7 +1755,10 @@ def test_try_ai_aside_classification_caches_result(tmp_path: Path):
     f.touch()
     with (
         patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
-        patch("jellyfiler.cli.suggest_aside_kind", return_value="INTERVIEWS") as mock_ai,
+        patch(
+            "jellyfiler.cli.suggest_aside_kind",
+            return_value=("INTERVIEWS", AiUsage(0, 0)),
+        ) as mock_ai,
     ):
         _try_ai_aside_classification(f, ctx)
         _try_ai_aside_classification(f, ctx)
@@ -1791,7 +1795,7 @@ def test_finalize_after_lookup_uses_ai_to_classify_aside(tmp_path: Path):
     with (
         patch("jellyfiler.cli._resolve_match", return_value=None),
         patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
-        patch("jellyfiler.cli.suggest_aside_kind", return_value="DELETED_SCENES"),
+        patch("jellyfiler.cli.suggest_aside_kind", return_value=("DELETED_SCENES", AiUsage(0, 0))),
     ):
         result = _finalize_after_lookup(
             cf,
@@ -1812,7 +1816,7 @@ def test_finalize_after_lookup_ai_says_main_media_falls_through_to_skip(tmp_path
     with (
         patch("jellyfiler.cli._resolve_match", return_value=None),
         patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake"}),
-        patch("jellyfiler.cli.suggest_aside_kind", return_value="MAIN_MEDIA"),
+        patch("jellyfiler.cli.suggest_aside_kind", return_value=("MAIN_MEDIA", AiUsage(0, 0))),
     ):
         result = _finalize_after_lookup(
             cf,
