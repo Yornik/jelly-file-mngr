@@ -35,6 +35,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from jellyfiler.models import Plan, PlannedMove
 
@@ -82,10 +83,19 @@ def _fmt_size(n: int) -> str:
 
 
 def find_duplicate_groups(moves: list[PlannedMove]) -> list[list[PlannedMove]]:
-    """Group moves whose destination collides. Single-element groups omitted."""
-    groups: dict[Path, list[PlannedMove]] = defaultdict(list)
+    """Group moves that represent the same canonical content.
+
+    Uses ``move.dedupe_key`` when set — that's a quality-independent identity
+    tuple populated by ``planner._dedupe_key`` so a 1080p file and a 720p file
+    of the same episode collide on the same key. Falls back to ``destination``
+    for moves without a key (e.g. legacy callers, skipped moves).
+
+    Single-element groups are omitted.
+    """
+    groups: dict[Any, list[PlannedMove]] = defaultdict(list)
     for m in moves:
-        groups[m.destination].append(m)
+        key = m.dedupe_key if m.dedupe_key is not None else m.destination
+        groups[key].append(m)
     return [g for g in groups.values() if len(g) > 1]
 
 

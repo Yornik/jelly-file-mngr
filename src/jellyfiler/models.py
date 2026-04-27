@@ -46,6 +46,15 @@ class PlannedMove:
     confidence: str  # "high" | "low"
     skipped: bool = False
     skip_reason: str = ""
+    # Dedupe identity — independent of quality/resolution. Two PlannedMoves with
+    # the same key represent the same canonical content and should be treated as
+    # duplicates by the dedupe pass.
+    #   Episode: (tmdb_id, season, episode, normalized_title)
+    #     — same title at different quality = duplicate
+    #     — different segment titles at the same SxxExx (e.g. Animaniacs) = NOT duplicate
+    #   Movie:   (tmdb_id, year)
+    # When None, falls back to ``destination`` so legacy code paths still work.
+    dedupe_key: tuple[object, ...] | None = None
 
 
 @dataclass

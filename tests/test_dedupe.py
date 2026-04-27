@@ -114,6 +114,72 @@ def test_find_duplicate_groups_three_way_collision():
     assert len(groups[0]) == 3
 
 
+def _move_with_key(source: Path, destination: Path, key: tuple) -> PlannedMove:
+    return PlannedMove(
+        source=source,
+        destination=destination,
+        media_type=MediaType.EPISODE,
+        tmdb_id=1,
+        matched_title="Show",
+        confidence="high",
+        dedupe_key=key,
+    )
+
+
+def test_find_duplicate_groups_uses_dedupe_key_over_destination():
+    """Two files at different qualities have DIFFERENT destination paths
+    (because of fancy-title) but the SAME dedupe_key — must still group."""
+    same_key = ("episode", 1, 1, 1, None, "", "pilot")
+    moves = [
+        _move_with_key(
+            Path("show.1080p.mkv"),
+            Path("/dest/S01E01-Pilot-Show-1080p.mkv"),  # different paths
+            same_key,
+        ),
+        _move_with_key(
+            Path("show.720p.mkv"),
+            Path("/dest/S01E01-Pilot-Show-720p.mkv"),  # different paths
+            same_key,
+        ),
+    ]
+    groups = find_duplicate_groups(moves)
+    assert len(groups) == 1
+    assert len(groups[0]) == 2
+
+
+def test_find_duplicate_groups_different_titles_same_sxxexx_NOT_duplicates():
+    """Animaniacs case: same SxxExx, DIFFERENT segment titles → must NOT collide."""
+    moves = [
+        _move_with_key(
+            Path("animaniacs.s03e08.warners.mp4"),
+            Path("/dest/S03E08-Warners-Animaniacs.mp4"),
+            ("episode", 1, 3, 8, None, "", "warners"),  # title in key
+        ),
+        _move_with_key(
+            Path("animaniacs.s03e08.flame.mp4"),
+            Path("/dest/S03E08-Flame-Animaniacs.mp4"),
+            ("episode", 1, 3, 8, None, "", "flame"),  # different title in key
+        ),
+    ]
+    groups = find_duplicate_groups(moves)
+    assert groups == []  # no duplicate groups — they're different segments
+
+
+def test_find_duplicate_groups_falls_back_to_destination_when_key_missing():
+    """Backward compatibility: moves without a dedupe_key still group by destination."""
+    dest = Path("/dest/S01E01.mkv")
+    moves = [
+        _move_with_key(Path("a.mkv"), dest, None),  # type: ignore[arg-type]
+        _move_with_key(Path("b.mkv"), dest, None),  # type: ignore[arg-type]
+    ]
+    # Override to None to verify fallback
+    for m in moves:
+        m.dedupe_key = None
+    groups = find_duplicate_groups(moves)
+    assert len(groups) == 1
+    assert len(groups[0]) == 2
+
+
 # ---------------------------------------------------------------------------
 # resolve_duplicates
 # ---------------------------------------------------------------------------

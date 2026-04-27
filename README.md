@@ -15,14 +15,21 @@ Files spanning multiple episodes (`Show.S03E01E02.mkv`) are renamed to Jellyfin'
 ### Bare episode filenames
 Files named after an episode title with no `S/E` marker (`Luck of the Fryrish.mkv`) no longer collapse every file in the folder to `S01E01.mkv`. In `--interactive` mode, after the show is matched on TMDB, the season episode list is fetched and shown so you can identify the correct episode by title.
 
-### Rich destination filenames
-By default episodes land as `S02E22.mkv`. Pass `--rich-names` to include the episode title, series name, and video quality in the filename:
+### Fancy destination filenames (default)
+By default episodes land with episode title, series name, and quality in the filename:
 
 ```
 S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
 ```
 
-Useful when people browse the SMB share directly rather than through Jellyfin. Jellyfin itself reads the `SxxExx` pattern and is happy with either format.
+This is the **default** because it disambiguates multi-segment episode slots — for example Animaniacs aired multiple short skits per broadcast slot, all sharing the same SxxExx, with different segment titles. Without the title in the filename those would collide on the same destination and get treated as duplicates.
+
+Pass `--slim-title` to opt back into the minimal `S02E22.mkv` format. Jellyfin reads the `SxxExx` prefix from either form.
+
+```bash
+uv run jellyfiler organize /source /dest --apply              # fancy (default)
+uv run jellyfiler organize /source /dest --slim-title --apply # minimal
+```
 
 ### Duplicate handling — `dedupe` subcommand
 When two source files would land at the same destination (e.g. a 1080p and a 720p of the same episode), use the `dedupe` subcommand to resolve them. `organize` itself just skips duplicates with a hint pointing here.
@@ -266,9 +273,9 @@ uv run jellyfiler organize /source /dest --type episode
 # Non-interactive — skip ambiguous matches instead of prompting (good for automation)
 uv run jellyfiler organize /source /dest --no-interactive --apply
 
-# Include episode title, series name, and quality in destination filenames
-# e.g. S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
-uv run jellyfiler organize /source /dest --rich-names --apply
+# Slim filenames (S02E22.mkv) — default is fancy
+# e.g. S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv (default)
+uv run jellyfiler organize /source /dest --slim-title --apply
 
 # Resolve duplicate destinations — see the dedupe subcommand below for details
 uv run jellyfiler dedupe /source /dest --quarantine-duplicates --apply
