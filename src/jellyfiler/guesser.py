@@ -15,6 +15,10 @@ _QUALITY_RESIDUE = re.compile(r"\s+\d{3,4}[bBpP][dD]?\b.*$")
 # Hey-Arnold-style split-episode marker: "S01E01a" / "S01E01b" → strip 'a/b' so guessit parses,
 # capture the letter so the destination filename keeps the two halves distinct.
 _SEGMENT_LETTER = re.compile(r"(?i)(S\d+E\d+)([a-c])(?=\b|[\s._-])")
+# Year ranges in folder names mean "season aired from X to Y", not "show premiered in X".
+# Examples: "Season 1 (1994-95)", "AVATAR (2005-2014)", "Book 3 - Fire (2007-08)".
+# When a parent-dir name has one of these, we suppress year fallback from that dir.
+_YEAR_RANGE = re.compile(r"\(\s*\d{4}\s*[-–]\s*\d{2,4}\s*\)")
 
 
 def _clean_title(title: str) -> str:
@@ -118,6 +122,11 @@ def guess(path: Path) -> GuessedMedia:
     if parent_name and parent_name not in {".", ""}:
         dir_result = _parse_name(parent_name)
         _, dir_title, dir_year, dir_season, _, _ = _extract(dir_result)
+
+        # Year ranges in parent names ("Season 1 (1994-95)") give a season-aired
+        # year, not the show's premiere year — drop the year so it doesn't leak.
+        if _YEAR_RANGE.search(parent_name):
+            dir_year = None
 
         if not title and dir_title:
             title = dir_title

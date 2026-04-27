@@ -1,8 +1,8 @@
 """Regression tests using real filename and folder patterns from the SMB library.
 
 These cases come from /mnt/smbshare/shared_evreyone/series/ and movies/. They
-document what guessit + our wrappers handle correctly, and pin down a few
-known parsing gaps so they don't silently regress.
+document what guessit + our wrappers handle correctly so messy real-world
+patterns don't silently regress.
 
 Patterns covered (sampled from a 226-folder series library + 121 movies):
   * Year-range folders: "AAAHH (1994-1997)", "Avatar (2005-2014)"
@@ -21,8 +21,6 @@ Patterns covered (sampled from a 226-folder series library + 121 movies):
 """
 
 from pathlib import Path
-
-import pytest
 
 from jellyfiler.guesser import guess
 from jellyfiler.junk import is_junk
@@ -354,20 +352,38 @@ def test_split_episode_destination_keeps_letter():
 
 
 # ---------------------------------------------------------------------------
-# Other known parsing gaps — pinned with xfail so refactors that fix them
-# get a notification (xpassed) and we can flip to a regular assertion.
+# Year ranges in parent dir names — "Season 1 (1994-95)" airing range, not
+# the show's premiere year. We drop year-from-parent when a range is present.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="'Season 1 (1994-95)' — guessit returns season=[1, 95], we take [0]=1 which is correct, "
-    "but year=1994 leaks into GuessedMedia (only used for movies, harmless for TV).",
-    strict=True,
-)
 def test_year_range_in_season_folder_is_not_treated_as_year():
+    """'Season 1 (1994-95)' must NOT leak year=1994 into GuessedMedia."""
     g = guess(Path("Season 1 (1994-95)") / "episode.mkv")
-    # We'd want year=None for the season folder, but currently year=1994 leaks through.
     assert g.year is None
+    assert g.season == 1
+
+
+def test_year_range_in_avatar_umbrella_folder_suppressed():
+    """Top-level 'AVATAR (2005-2014)' year range likewise suppressed."""
+    g = guess(
+        Path("AVATAR (2005-2014) - 2010 Movie, The Last Airbender, Legend of Korra - 720p x264")
+        / "Avatar.S01E01.mkv"
+    )
+    # Year shouldn't be 2005 from the umbrella folder's date range.
+    assert g.year is None
+
+
+def test_book_with_year_range_suppressed():
+    """'Book 3 - Fire (2007-08)' season folder shouldn't pull year from the range either."""
+    g = guess(Path("Book 3 - Fire (2007-08)") / "Avatar.S03E01.mkv")
+    assert g.year is None
+
+
+def test_single_year_in_parent_dir_still_works():
+    """Sanity: a real single-year movie folder still backfills year (regression guard)."""
+    g = guess(Path("Blade.Runner.2049.2017.UHD") / "Blade.Runner.2049.mkv")
+    assert g.year == 2017
 
 
 # ---------------------------------------------------------------------------
