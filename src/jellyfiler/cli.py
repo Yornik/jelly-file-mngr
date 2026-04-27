@@ -714,20 +714,28 @@ def organize(
         # `--quarantine-duplicates` is a non-interactive auto-quarantine: always
         # keep the highest quality, move losers to .junk/duplicates/. We achieve
         # it by injecting a synthetic "always quarantine" prompt that fires once.
-        synthetic_prompt = None
-        run_interactive = interactive
-        if quarantine_duplicates:
-            from jellyfiler.dedupe import DuplicateChoice as _DC
+        from jellyfiler.dedupe import DuplicateChoice as _DC
+        from jellyfiler.dedupe import PromptFn as _PromptFn
 
-            def synthetic_prompt(_group):
+        prompt_fn: _PromptFn | None
+        if quarantine_duplicates:
+
+            def _quarantine_prompt(_group: list[PlannedMove]) -> _DC:
                 return _DC(_DC.ALWAYS_QUARANTINE)
 
+            prompt_fn = _quarantine_prompt
             run_interactive = True  # so resolve_duplicates calls our synthetic prompt
+        elif interactive:
+            prompt_fn = prompt_duplicate_choice
+            run_interactive = True
+        else:
+            prompt_fn = None
+            run_interactive = False
         plan, losers_to_delete, losers_to_quarantine, dirs_to_remove = resolve_duplicates(
             plan,
             interactive=run_interactive,
             auto_remove=remove_duplicates,
-            prompt=synthetic_prompt or (prompt_duplicate_choice if interactive else None),
+            prompt=prompt_fn,
         )
         if losers_to_delete and not quiet:
             console.print(
