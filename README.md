@@ -15,11 +15,22 @@ Files spanning multiple episodes (`Show.S03E01E02.mkv`) are renamed to Jellyfin'
 ### Bare episode filenames
 Files named after an episode title with no `S/E` marker (`Luck of the Fryrish.mkv`) no longer collapse every file in the folder to `S01E01.mkv`. In `--interactive` mode, after the show is matched on TMDB, the season episode list is fetched and shown so you can identify the correct episode by title.
 
+### Rich destination filenames
+By default episodes land as `S02E22.mkv`. Pass `--rich-names` to include the episode title, series name, and video quality in the filename:
+
+```
+S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
+```
+
+Useful when people browse the SMB share directly rather than through Jellyfin. Jellyfin itself reads the `SxxExx` pattern and is happy with either format.
+
 ### Subtitle sidecars
 After each video move, subtitle files sharing the same stem (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`, `.sup`) are moved alongside and renamed to match the destination. Language codes are preserved: `episode.en.srt` → `S01E05.en.srt`.
 
+Subtitles packed in a subdirectory next to the video (`Subs/`, `Subtitles/`, `English/`, etc.) are automatically discovered — not just files sitting directly beside the video.
+
 ### Claude Haiku AI search fallback
-When all title-variant retries fail to find a TMDB match, the tool can send the raw release directory and filename to `claude-haiku-4-5` for a clean search query. Set `ANTHROPIC_API_KEY` to enable — silently skipped otherwise. The prompt is a single system instruction + the two raw strings, keeping token usage minimal across large libraries.
+When TMDB title-variant retries **and** the AniList anime fallback both miss, the tool can send the raw release directory and filename to `claude-haiku-4-5` for a clean search query. Set `ANTHROPIC_API_KEY` and pass `--use-ai` to enable — silently skipped otherwise. AniList runs first, so anime titles only reach the paid AI fallback when AniList itself can't find them. The prompt is a single system instruction + the two raw strings, keeping token usage minimal across large libraries.
 
 ---
 
@@ -103,6 +114,10 @@ uv run jellyfiler /source /dest --type episode
 
 # Non-interactive — skip ambiguous matches instead of prompting (good for automation)
 uv run jellyfiler /source /dest --no-interactive --apply
+
+# Include episode title, series name, and quality in destination filenames
+# e.g. S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
+uv run jellyfiler /source /dest --rich-names --apply
 
 # Enable Claude Haiku AI fallback for titles that defeat all other parsing
 # (requires ANTHROPIC_API_KEY — off by default to avoid unintentional spend)

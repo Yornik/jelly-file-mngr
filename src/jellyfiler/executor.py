@@ -39,23 +39,35 @@ class ExecutionError(Exception):
 
 
 def _subtitle_companions(source: Path) -> list[Path]:
-    """Return subtitle files in the same directory that share source's stem.
+    """Return subtitle files that share source's stem.
+
+    Searches the source's own directory plus any immediate subdirectories
+    (e.g. Subs/, Subtitles/, English/) to handle the common torrent pattern
+    where subtitle files are packed in a sub-folder next to the video.
 
     Matches exact stem (``episode.srt``) and stem-plus-lang-code (``episode.en.srt``).
     """
     stem = source.stem
     companions = []
-    for candidate in source.parent.iterdir():
-        if candidate.suffix.lower() not in SUBTITLE_EXTENSIONS:
-            continue
-        # exact match: episode.srt
-        if candidate.stem == stem:
-            companions.append(candidate)
-            continue
-        # lang-code match: episode.en.srt → inner_stem="episode", lang="en"
-        inner = Path(candidate.stem)
-        if inner.stem == stem and _LANG_CODE.match(inner.suffix.lstrip(".")):
-            companions.append(candidate)
+
+    search_dirs = [source.parent] + [
+        d for d in source.parent.iterdir() if d.is_dir() and d != source.parent
+    ]
+
+    for search_dir in search_dirs:
+        for candidate in search_dir.iterdir():
+            if not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in SUBTITLE_EXTENSIONS:
+                continue
+            # exact match: episode.srt
+            if candidate.stem == stem:
+                companions.append(candidate)
+                continue
+            # lang-code match: episode.en.srt → inner_stem="episode", lang="en"
+            inner = Path(candidate.stem)
+            if inner.stem == stem and _LANG_CODE.match(inner.suffix.lstrip(".")):
+                companions.append(candidate)
     return companions
 
 

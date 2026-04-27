@@ -192,6 +192,13 @@ def organize(
             help="Remove empty source directories after moving files (only with --in-place --apply).",
         ),
     ] = False,
+    rich_names: Annotated[
+        bool,
+        typer.Option(
+            "--rich-names",
+            help="Include episode title, series title, and quality in the destination filename: S01E01-Episode Title-Show Name-720p.ext",
+        ),
+    ] = False,
     cache_db: Annotated[
         Path,
         typer.Option("--cache-db", help="Path to the SQLite cache database."),
@@ -414,7 +421,7 @@ def organize(
                     console.print(
                         f"[dim]PINNED:[/dim] {guessed.title} → {pinned.title} ({pinned.year})"
                     )
-                planned_moves.append(plan_move(guessed, pinned, dest, file))
+                planned_moves.append(plan_move(guessed, pinned, dest, file, rich_names=rich_names))
                 progress.advance(task)
                 continue
 
@@ -464,7 +471,31 @@ def organize(
                     except Exception:
                         pass
 
-            # AI fallback: if all variants missed, ask Haiku for a better search query
+            # AniList fallback runs BEFORE AI: free + authoritative for anime,
+            # so we don't burn AI tokens on titles that AniList would catch.
+            if (
+                not best_match(matches, search_title, guessed.year)
+                and guessed.media_type == MediaType.EPISODE
+                and looks_like_anime(file.name)
+            ):
+                try:
+                    al_cached = cache.get_tmdb(guessed.title, guessed.year, MediaType.EPISODE)
+                    if al_cached is None:
+                        al_matches = search_anime(guessed.title)
+                        cache.set_tmdb(guessed.title, guessed.year, MediaType.EPISODE, al_matches)
+                    else:
+                        al_matches = al_cached
+                    if al_matches:
+                        if not quiet:
+                            console.print(
+                                f"[dim]TMDB missed '{guessed.title}' — trying AniList...[/dim]"
+                            )
+                        matches = al_matches
+                        search_title = guessed.title
+                except Exception as exc:
+                    console.print(f"[dim]AniList fallback failed for '{file.name}': {exc}[/dim]")
+
+            # AI fallback: only if variants AND AniList both missed
             if use_ai and not ai_disabled and not best_match(matches, search_title, guessed.year):
                 ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
                 if ai_key:
@@ -525,39 +556,6 @@ def organize(
             if interactive:
                 progress.start()
 
-            # AniList fallback: if TMDB missed and this looks like anime, try AniList
-            if (
-                match is None
-                and guessed.media_type == MediaType.EPISODE
-                and looks_like_anime(file.name)
-            ):
-                try:
-                    al_cached = cache.get_tmdb(guessed.title, guessed.year, MediaType.EPISODE)
-                    if al_cached is None:
-                        al_matches = search_anime(guessed.title)
-                        cache.set_tmdb(guessed.title, guessed.year, MediaType.EPISODE, al_matches)
-                    else:
-                        al_matches = al_cached
-                    if al_matches:
-                        if not quiet:
-                            console.print(
-                                f"[dim]TMDB missed '{guessed.title}' — trying AniList...[/dim]"
-                            )
-                        if interactive:
-                            progress.stop()
-                        match = _resolve_match(
-                            file,
-                            guessed.title,
-                            guessed.year,
-                            al_matches,
-                            guessed.media_type,
-                            interactive,
-                        )
-                        if interactive:
-                            progress.start()
-                except Exception as exc:
-                    console.print(f"[dim]AniList fallback failed for '{file.name}': {exc}[/dim]")
-
             if not match and not interactive and matches:
                 if not quiet:
                     console.print(
@@ -601,7 +599,7 @@ def organize(
 
             if interactive and match is None and not matches:
                 progress.stop()
-            planned_moves.append(plan_move(guessed, match, dest, file))
+            planned_moves.append(plan_move(guessed, match, dest, file, rich_names=rich_names))
             if interactive and match is None and not matches:
                 progress.start()
 
