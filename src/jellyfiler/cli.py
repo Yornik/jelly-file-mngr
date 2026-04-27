@@ -37,7 +37,7 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from jellyfiler.ai_query import AiQueryError, preflight_check, suggest_search
+from jellyfiler.ai_query import AiQueryError, preflight_check, suggest_aside_kind, suggest_search
 from jellyfiler.anilist import looks_like_anime, search_anime
 from jellyfiler.aside import (
     JELLYFIN_EXTRAS_SUBDIR,
@@ -228,6 +228,10 @@ class OrganizeContext:
     ai_disabled: bool = False  # toggled to True if the user opts out mid-run
     parallel: int = 1
     logger: NullLogger = field(default_factory=NullLogger)
+    # Memoise Haiku aside-classification results for the duration of a run.
+    # Keyed by (parent_dir_name, filename); values are the AsideKind label
+    # string returned by suggest_aside_kind (or "MAIN_MEDIA" / "" for misses).
+    ai_aside_cache: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
 @dataclass
@@ -786,7 +790,22 @@ def _finalize_after_lookup(
             confidence=move.confidence,
             pinned=True,
         )
-    elif move.skipped:
+        return FileResult(kind="planned", move=move)
+
+    # No TMDB match. Last-chance: ask Haiku whether this is bonus content.
+    # Pattern-based classify_aside (in phase 1) already missed it, but Haiku
+    # can read the parent dir + filename together and recognise foreign-language
+    # extras dirs ("Bonusy/", "Doplnki/", …) or content that's just oddly named.
+    if move.skipped:
+        ai_kind = _try_ai_aside_classification(file, ctx)
+        if ai_kind is not None and ai_kind != AsideKind.DISCARD:
+            # AI says it's a real extras kind. Skip gets converted to aside routing.
+            ctx.logger.info(
+                "classify_aside_via_ai",
+                file=file,
+                aside_kind=ai_kind.value,
+            )
+            return FileResult(kind="aside", aside_kind=ai_kind)
         ctx.logger.warning(
             "match_skipped",
             file=file,
@@ -794,6 +813,45 @@ def _finalize_after_lookup(
             reason=move.skip_reason,
         )
     return FileResult(kind="planned", move=move)
+
+
+def _try_ai_aside_classification(file: Path, ctx: OrganizeContext) -> AsideKind | None:
+    """Ask Haiku to classify ``file`` as an aside-kind. Cached per run.
+
+    Returns ``None`` if AI is disabled, the model isn't sure, or the response
+    says ``MAIN_MEDIA`` (i.e., Haiku thinks this is real media — let the
+    normal "no TMDB match" skip happen).
+    """
+    if not ctx.use_ai or ctx.ai_disabled:
+        return None
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+
+    cache_key = (file.parent.name, file.name)
+    if cache_key in ctx.ai_aside_cache:
+        cached = ctx.ai_aside_cache[cache_key]
+        return AsideKind(cached.lower()) if cached and cached != "MAIN_MEDIA" else None
+
+    try:
+        kind_str = suggest_aside_kind(file.parent.name, file.name, api_key)
+    except AiQueryError as exc:
+        # Don't abort the whole run — log and treat as "no AI suggestion".
+        ctx.logger.warning("ai_aside_classify_error", file=file, error=str(exc))
+        ctx.ai_aside_cache[cache_key] = ""
+        return None
+
+    if kind_str is None:
+        ctx.ai_aside_cache[cache_key] = ""
+        return None
+    ctx.ai_aside_cache[cache_key] = kind_str
+
+    if kind_str == "MAIN_MEDIA":
+        return None
+    try:
+        return AsideKind(kind_str.lower())
+    except ValueError:
+        return None
 
 
 def _process_one_file(

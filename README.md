@@ -144,7 +144,9 @@ output/
 **Smart routing of non-canonical content (extras, samples, sidecars):**
 
 * **Jellyfin-recognised extras** — files inside `Featurettes/`, `Behind the Scenes/`, `Deleted Scenes/`, `Interviews/`, `Trailers/`, `Shorts/`, `Bloopers/`, `DVD Extras/`, `Bonus Features/`, `Specials/` or generic `Extras/` are routed into the matching subdirectory of the parent media item (`<Movie> (Year)/featurettes/...`, `<Show>/behind the scenes/...`). Jellyfin then displays them as bonus content alongside the main title.
-* **DISCARD content** — samples, NCOP/NCED tracks, hash-named files, RARBG promo videos, and `.nfo`/`.txt`/`.jpg`/etc. sidecars go to `dest/.aside/` by default (recoverable). Pass `--remove-discards --i-mean-it` to **PERMANENTLY DELETE** them instead. Without `--i-mean-it` the run aborts with a big red warning.
+* **Anime OP/ED** — non-credit opening/ending tracks (`NCOP`, `NCED`, `Creditless_OP1`, files in `OP/`/`ED/`/`Openings/`/`Endings/` folders) preserve to `<Show>/extras/op-ed/`.
+* **AI fallback for unknown dir names** (`--use-ai`) — the parent-dir patterns above can't enumerate every variant: `Bonusy/` (Polish), `Doplnki/` (Czech), `Bonus-Materials/`, ad-hoc names, etc. When the patterns miss AND TMDB can't match the file as main media, Claude Haiku reads the parent-dir + filename together and decides on a kind (FEATURETTES / DELETED_SCENES / etc.) or returns MAIN_MEDIA to fall through. Cached per `(parent_dir, filename)` so a release group's pattern is classified once. Same `--use-ai` flag as the existing TMDB-search fallback.
+* **DISCARD content** — samples, hash-named files, RARBG promo videos, and `.nfo`/`.txt`/`.jpg`/etc. sidecars go to `dest/.aside/` by default (recoverable). Pass `--remove-discards --i-mean-it` to **PERMANENTLY DELETE** them instead. Without `--i-mean-it` the run aborts with a big red warning.
 * **Orphan extras** (extras folders with no parent movie/show match) fall back to `dest/.aside/`.
 
 The `.aside/` prefix is dot-prefixed so Jellyfin ignores it during scans.
