@@ -1575,7 +1575,7 @@ def organize(
         parallel=parallel,
         interactive=interactive,
         use_ai=use_ai,
-        rich_names=rich_names,
+        fancy_title=fancy_title,
         file_count=len(files),
     )
     ctx = OrganizeContext(
