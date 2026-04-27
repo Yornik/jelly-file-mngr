@@ -98,6 +98,45 @@ def test_move_subtitle_skips_existing_dest(tmp_path):
     assert existing.read_text() == "existing"  # not overwritten
 
 
+def test_subtitle_companions_in_subs_subdirectory(tmp_path):
+    """Subtitles in a Subs/ subfolder next to the video are found."""
+    video = tmp_path / "episode.mkv"
+    video.touch()
+    subs_dir = tmp_path / "Subs"
+    subs_dir.mkdir()
+    sub = subs_dir / "episode.srt"
+    sub.touch()
+    result = _subtitle_companions(video)
+    assert sub in result
+
+
+def test_subtitle_companions_in_subs_subdir_with_lang(tmp_path):
+    """Language-coded subtitles in Subs/ subfolder are also found."""
+    video = tmp_path / "episode.mkv"
+    video.touch()
+    subs_dir = tmp_path / "Subtitles"
+    subs_dir.mkdir()
+    sub_en = subs_dir / "episode.en.srt"
+    sub_nl = subs_dir / "episode.nl.srt"
+    sub_en.touch()
+    sub_nl.touch()
+    result = _subtitle_companions(video)
+    assert sub_en in result
+    assert sub_nl in result
+
+
+def test_subtitle_companions_subdir_ignores_wrong_stem(tmp_path):
+    """Subtitle in subdir with a different stem is not matched."""
+    video = tmp_path / "episode.mkv"
+    video.touch()
+    subs_dir = tmp_path / "Subs"
+    subs_dir.mkdir()
+    wrong = subs_dir / "other_show.srt"
+    wrong.touch()
+    result = _subtitle_companions(video)
+    assert wrong not in result
+
+
 def test_executor_moves_subtitle_alongside_video(tmp_path):
     from jellyfiler.cache import Cache
     from jellyfiler.executor import execute

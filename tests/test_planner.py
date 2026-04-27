@@ -6,6 +6,7 @@ from jellyfiler.models import GuessedMedia, MediaType, Plan, PlannedMove, TmdbMa
 from jellyfiler.planner import (
     _episode_destination,
     _movie_destination,
+    _quality_tag,
     _safe_name,
     build_plan,
     plan_move,
@@ -166,6 +167,124 @@ def test_plan_move_unknown_type_is_skipped():
     result = plan_move(guessed, match, Path("/dest"), Path("unknown.mkv"))
     assert result.skipped
     assert "media type" in result.skip_reason
+
+
+# ---------------------------------------------------------------------------
+# rich_names
+# ---------------------------------------------------------------------------
+
+
+def test_rich_names_episode_all_fields():
+    """S01E01-Episode Title-Show Name-720p.mkv when all fields present."""
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S01E01.720p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=1,
+        episode=1,
+        episode_title="Space Pilot 3000",
+        raw_guess={"screen_size": "720p"},
+    )
+    dest = _episode_destination(
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), rich_names=True
+    )
+    assert dest == Path("/dest/Futurama/Season 01/S01E01-Space Pilot 3000-Futurama-720p.mkv")
+
+
+def test_rich_names_episode_no_episode_title():
+    """S01E01-Show Name-720p.mkv when episode title is absent."""
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S01E01.720p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=1,
+        episode=1,
+        episode_title=None,
+        raw_guess={"screen_size": "720p"},
+    )
+    dest = _episode_destination(
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), rich_names=True
+    )
+    assert dest == Path("/dest/Futurama/Season 01/S01E01-Futurama-720p.mkv")
+
+
+def test_rich_names_episode_no_quality():
+    """S01E01-Episode Title-Show Name.mkv when no screen_size in raw_guess."""
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S01E01.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=1,
+        episode=1,
+        episode_title="Space Pilot 3000",
+        raw_guess={},
+    )
+    dest = _episode_destination(
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.mkv"), rich_names=True
+    )
+    assert dest == Path("/dest/Futurama/Season 01/S01E01-Space Pilot 3000-Futurama.mkv")
+
+
+def test_rich_names_false_gives_plain_code():
+    """Default (rich_names=False) still produces plain S01E01.mkv."""
+    match = TmdbMatch(tmdb_id=3, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S01E01.720p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=1,
+        episode=1,
+        episode_title="Space Pilot 3000",
+        raw_guess={"screen_size": "720p"},
+    )
+    dest = _episode_destination(
+        Path("/dest"), match, guessed, Path("Futurama.S01E01.720p.mkv"), rich_names=False
+    )
+    assert dest == Path("/dest/Futurama/Season 01/S01E01.mkv")
+
+
+def test_quality_tag_present():
+    guessed = GuessedMedia(
+        source_path=Path("x.mkv"),
+        media_type=MediaType.EPISODE,
+        title="X",
+        raw_guess={"screen_size": "1080p"},
+    )
+    assert _quality_tag(guessed) == "1080p"
+
+
+def test_quality_tag_absent():
+    guessed = GuessedMedia(
+        source_path=Path("x.mkv"),
+        media_type=MediaType.EPISODE,
+        title="X",
+        raw_guess={},
+    )
+    assert _quality_tag(guessed) == ""
+
+
+def test_plan_move_rich_names_episode():
+    """plan_move passes rich_names=True through to the destination."""
+    guessed = GuessedMedia(
+        source_path=Path("Futurama.S12E03.720p.mkv"),
+        media_type=MediaType.EPISODE,
+        title="Futurama",
+        season=12,
+        episode=3,
+        episode_title="Bendless Love",
+        raw_guess={"screen_size": "720p"},
+    )
+    match = TmdbMatch(tmdb_id=2, title="Futurama", year=1999, media_type=MediaType.EPISODE)
+    result = plan_move(
+        guessed, match, Path("/dest"), Path("Futurama.S12E03.720p.mkv"), rich_names=True
+    )
+    assert not result.skipped
+    assert result.destination == Path(
+        "/dest/Futurama/Season 12/S12E03-Bendless Love-Futurama-720p.mkv"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -15,11 +15,22 @@ Files spanning multiple episodes (`Show.S03E01E02.mkv`) are renamed to Jellyfin'
 ### Bare episode filenames
 Files named after an episode title with no `S/E` marker (`Luck of the Fryrish.mkv`) no longer collapse every file in the folder to `S01E01.mkv`. In `--interactive` mode, after the show is matched on TMDB, the season episode list is fetched and shown so you can identify the correct episode by title.
 
+### Rich destination filenames
+By default episodes land as `S02E22.mkv`. Pass `--rich-names` to include the episode title, series name, and video quality in the filename:
+
+```
+S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
+```
+
+Useful when people browse the SMB share directly rather than through Jellyfin. Jellyfin itself reads the `SxxExx` pattern and is happy with either format.
+
 ### Subtitle sidecars
 After each video move, subtitle files sharing the same stem (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`, `.sup`) are moved alongside and renamed to match the destination. Language codes are preserved: `episode.en.srt` → `S01E05.en.srt`.
 
+Subtitles packed in a subdirectory next to the video (`Subs/`, `Subtitles/`, `English/`, etc.) are automatically discovered — not just files sitting directly beside the video.
+
 ### Claude Haiku AI search fallback
-When all title-variant retries fail to find a TMDB match, pass `--use-ai` to send the raw release directory and filename to `claude-haiku-4-5` for a clean search query. Requires `ANTHROPIC_API_KEY` — the flag is always opt-in so tokens are never spent without explicit intent.
+When TMDB title-variant retries **and** the AniList anime fallback both miss, pass `--use-ai` to send the raw release directory and filename to `claude-haiku-4-5` for a clean search query. Requires `ANTHROPIC_API_KEY` — the flag is always opt-in so tokens are never spent without explicit intent. AniList runs first, so anime titles only reach the paid AI fallback when AniList itself can't find them.
 
 Before scanning any files, `--use-ai` runs a preflight check: it verifies the key is set and that Haiku responds correctly. If either fails, the run aborts immediately with a clear error.
 
@@ -109,6 +120,10 @@ uv run jellyfiler organize /source /dest --type episode
 
 # Non-interactive — skip ambiguous matches instead of prompting (good for automation)
 uv run jellyfiler organize /source /dest --no-interactive --apply
+
+# Include episode title, series name, and quality in destination filenames
+# e.g. S02E22-The Cave of Two Lovers-Avatar The Last Airbender-720p.mkv
+uv run jellyfiler organize /source /dest --rich-names --apply
 
 # Enable Claude Haiku AI fallback for titles that defeat all other parsing
 # (requires ANTHROPIC_API_KEY — off by default to avoid unintentional spend)
