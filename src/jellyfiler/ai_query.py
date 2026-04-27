@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import NamedTuple
 
 try:
     import anthropic as _anthropic
@@ -18,6 +19,11 @@ except ImportError:
 
 _SYSTEM_MOVIE = 'Extract the movie title and release year from a release name. Reply with ONLY JSON: {"title":"...","year":null}'
 _SYSTEM_TV = 'Extract the TV show title from a release name. Reply with ONLY JSON: {"title":"..."}'
+
+# Haiku 4.5 pricing (USD per token)
+_PRICE_INPUT_PER_TOKEN = 0.80 / 1_000_000
+_PRICE_OUTPUT_PER_TOKEN = 4.00 / 1_000_000
+_USD_TO_EUR = 0.92
 
 # Classification labels Haiku can return. Keep in sync with AsideKind in aside.py
 # plus MAIN_MEDIA (= "this is a real episode/movie, not bonus content").
@@ -60,6 +66,25 @@ class AiQueryError(Exception):
     """Raised when the Anthropic API call itself fails (auth, network, quota)."""
 
 
+class AiUsage(NamedTuple):
+    input_tokens: int
+    output_tokens: int
+
+    def cost_eur(self) -> float:
+        usd = (
+            self.input_tokens * _PRICE_INPUT_PER_TOKEN
+            + self.output_tokens * _PRICE_OUTPUT_PER_TOKEN
+        )
+        return usd * _USD_TO_EUR
+
+    def __add__(self, other: object) -> AiUsage:
+        if not isinstance(other, AiUsage):
+            return NotImplemented
+        return AiUsage(
+            self.input_tokens + other.input_tokens, self.output_tokens + other.output_tokens
+        )
+
+
 def preflight_check(api_key: str) -> bool:
     """Send a minimal ping to Haiku and verify it responds with "true".
 
@@ -87,15 +112,15 @@ def suggest_search(
     filename: str,
     api_key: str,
     is_tv: bool = False,
-) -> dict[str, object] | None:
+) -> tuple[dict[str, object] | None, AiUsage]:
     """Ask Claude Haiku to parse a release name into a clean TMDB search query.
 
-    For movies returns {title, year}. For TV returns {title} only.
-    Returns None when the model gives an unusable response (bad JSON, no title).
+    For movies returns ({title, year}, usage). For TV returns ({title}, usage).
+    Returns (None, usage) when the model gives an unusable response (bad JSON, no title).
     Raises AiQueryError when the API call itself fails (auth, network, quota).
     """
     if not _ANTHROPIC_AVAILABLE or _anthropic is None:
-        return None
+        return None, AiUsage(0, 0)
 
     try:
         client = _anthropic.Anthropic(api_key=api_key)
@@ -113,31 +138,32 @@ def suggest_search(
     except Exception as exc:
         raise AiQueryError(str(exc)) from exc
 
+    usage = AiUsage(message.usage.input_tokens, message.usage.output_tokens)
     block = message.content[0]
     if not isinstance(block, _TextBlock):
-        return None
+        return None, usage
     raw = block.text.strip()
     # Strip markdown code fences if the model wraps the JSON
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL).strip()
     try:
         data: dict[str, object] = json.loads(raw)
     except Exception:
-        return None
+        return None, usage
     if not isinstance(data.get("title"), str) or not data["title"]:
-        return None
-    return data
+        return None, usage
+    return data, usage
 
 
 def suggest_aside_kind(
     parent_dir: str,
     filename: str,
     api_key: str,
-) -> str | None:
+) -> tuple[str | None, AiUsage]:
     """Ask Claude Haiku to classify a file as MAIN_MEDIA / DISCARD / extras-kind.
 
-    Returns the label string when the model answers cleanly, ``None`` on any
-    parse error or unrecognised label. Raises :class:`AiQueryError` when the
-    API call itself fails so the caller can decide whether to abort the run.
+    Returns ``(label, usage)`` when the model answers cleanly, ``(None, usage)``
+    on any parse error or unrecognised label. Raises :class:`AiQueryError` when
+    the API call itself fails so the caller can decide whether to abort the run.
 
     Pattern-based ``classify_aside`` in aside.py uses parent-dir-name regexes
     which miss foreign-language names (``Bonusy/``, ``Doplnki/``, …) and
@@ -145,7 +171,7 @@ def suggest_aside_kind(
     + parent-dir together — much more reliable than name regexes.
     """
     if not _ANTHROPIC_AVAILABLE or _anthropic is None:
-        return None
+        return None, AiUsage(0, 0)
 
     try:
         client = _anthropic.Anthropic(api_key=api_key)
@@ -163,19 +189,20 @@ def suggest_aside_kind(
     except Exception as exc:
         raise AiQueryError(str(exc)) from exc
 
+    usage = AiUsage(message.usage.input_tokens, message.usage.output_tokens)
     block = message.content[0]
     if not isinstance(block, _TextBlock):
-        return None
+        return None, usage
     raw = block.text.strip()
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL).strip()
     try:
         data: dict[str, object] = json.loads(raw)
     except Exception:
-        return None
+        return None, usage
     kind = data.get("kind")
     if not isinstance(kind, str):
-        return None
+        return None, usage
     kind = kind.strip().upper()
     if kind not in _VALID_ASIDE_KINDS:
-        return None
-    return kind
+        return None, usage
+    return kind, usage

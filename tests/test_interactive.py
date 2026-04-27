@@ -1,5 +1,6 @@
 """Tests for interactive prompt helpers."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 from jellyfiler.interactive import (
@@ -69,14 +70,14 @@ def test_prompt_tmdb_match_auto_selects_single_result():
     """When TMDB returns exactly one result, it's auto-selected without a prompt."""
     matches = [_tmdb("Coco", 2017)]
     # No prompt patch — if it tried to prompt, the test would block forever
-    result = prompt_tmdb_match("file.mkv", "Coco", matches, MediaType.MOVIE)
+    result = prompt_tmdb_match(Path("file.mkv"), "Coco", matches, MediaType.MOVIE)
     assert result is matches[0]
 
 
 def test_prompt_tmdb_match_valid_choice():
     matches = [_tmdb("Avatar", 2009, 1), _tmdb("Avatar: The Last Airbender", 2005, 2)]
     with patch("jellyfiler.interactive.typer.prompt", return_value="2"):
-        result = prompt_tmdb_match("file.mkv", "Avatar", matches, MediaType.EPISODE)
+        result = prompt_tmdb_match(Path("file.mkv"), "Avatar", matches, MediaType.EPISODE)
     assert result is not None
     assert result.tmdb_id == 2
 
@@ -84,28 +85,28 @@ def test_prompt_tmdb_match_valid_choice():
 def test_prompt_tmdb_match_skip_zero():
     matches = [_tmdb("A", 2020, 1), _tmdb("B", 2021, 2)]
     with patch("jellyfiler.interactive.typer.prompt", return_value="0"):
-        result = prompt_tmdb_match("file.mkv", "A", matches, MediaType.EPISODE)
+        result = prompt_tmdb_match(Path("file.mkv"), "A", matches, MediaType.EPISODE)
     assert result is None
 
 
 def test_prompt_tmdb_match_skip_empty():
     matches = [_tmdb("A", 2020, 1), _tmdb("B", 2021, 2)]
     with patch("jellyfiler.interactive.typer.prompt", return_value=""):
-        result = prompt_tmdb_match("file.mkv", "A", matches, MediaType.EPISODE)
+        result = prompt_tmdb_match(Path("file.mkv"), "A", matches, MediaType.EPISODE)
     assert result is None
 
 
 def test_prompt_tmdb_match_invalid_input():
     matches = [_tmdb("A", 2020, 1), _tmdb("B", 2021, 2)]
     with patch("jellyfiler.interactive.typer.prompt", return_value="abc"):
-        result = prompt_tmdb_match("file.mkv", "A", matches, MediaType.EPISODE)
+        result = prompt_tmdb_match(Path("file.mkv"), "A", matches, MediaType.EPISODE)
     assert result is None
 
 
 def test_prompt_tmdb_match_out_of_range():
     matches = [_tmdb("A", 2020, 1), _tmdb("B", 2021, 2)]
     with patch("jellyfiler.interactive.typer.prompt", return_value="99"):
-        result = prompt_tmdb_match("file.mkv", "A", matches, MediaType.EPISODE)
+        result = prompt_tmdb_match(Path("file.mkv"), "A", matches, MediaType.EPISODE)
     assert result is None
 
 
@@ -113,7 +114,7 @@ def test_prompt_tmdb_match_caps_display_at_ten():
     """More than 10 results — only the first 10 are shown, choice 10 picks index 9."""
     matches = [_tmdb(f"Show {i}", 2000 + i, tmdb_id=i) for i in range(15)]
     with patch("jellyfiler.interactive.typer.prompt", return_value="10"):
-        result = prompt_tmdb_match("file.mkv", "Show", matches, MediaType.EPISODE)
+        result = prompt_tmdb_match(Path("file.mkv"), "Show", matches, MediaType.EPISODE)
     assert result is not None
     assert result.tmdb_id == 9  # 10th item = matches[9]
 

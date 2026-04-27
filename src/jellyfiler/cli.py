@@ -37,7 +37,12 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from jellyfiler.ai_query import AiQueryError, preflight_check, suggest_aside_kind, suggest_search
+from jellyfiler.ai_query import (
+    AiQueryError,
+    preflight_check,
+    suggest_aside_kind,
+    suggest_search,
+)
 from jellyfiler.anilist import looks_like_anime, search_anime
 from jellyfiler.aside import (
     JELLYFIN_EXTRAS_SUBDIR,
@@ -144,10 +149,14 @@ def _title_variants(title: str) -> list[str]:
     spaced = _CAMEL_SPLIT.sub(" ", title)
     if spaced != title:
         variants.append(spaced)
-    if " " not in title and title == title.lower():
-        segmented = " ".join(wordninja.split(title))
-        if segmented != title:
-            variants.append(segmented)
+    # Word-segment run-together words (any case): "wonderwoman" → "wonder woman",
+    # "Bestgayiceskatinganime" (normalized from all-caps) → "Best Gay Ice Skating Anime"
+    if " " not in title:
+        parts = wordninja.split(title.lower())
+        if len(parts) > 1:
+            segmented = " ".join(p.capitalize() for p in parts)
+            if segmented.lower() != title.lower():
+                variants.append(segmented)
     return variants
 
 
@@ -164,7 +173,8 @@ def _resolve_match(
     if match:
         return match
     if interactive and matches:
-        return prompt_tmdb_match(file.name, guessed_title, matches, media_type)
+        # We have TMDB results but none matched confidently — let the user pick
+        return prompt_tmdb_match(file, guessed_title, matches, media_type)
     return None
 
 
@@ -176,6 +186,37 @@ def _fmt_size(total_bytes: int) -> str:
     return f"{total_bytes:.0f} TB"
 
 
+def _simulate_empty_dirs(source: Path, files_leaving: set[Path]) -> tuple[int, int]:
+    """Count directories that would become empty after files_leaving are removed.
+
+    Mirrors the bottom-up rmdir logic in :func:`_remove_empty_dirs`, but never
+    touches the filesystem. PermissionError on iterdir is treated as
+    "non-empty" so we never claim we'd remove a dir we can't see into.
+
+    Returns ``(would_remove_count, permission_error_count)``.
+    """
+    remaining = {f for f in source.rglob("*") if f.is_file() and f not in files_leaving}
+    would_remove: set[Path] = set()
+    perm_errors = 0
+    for dirpath in sorted(source.rglob("*"), reverse=True):
+        if dirpath == source or not dirpath.is_dir():
+            continue
+        try:
+            children = list(dirpath.iterdir())
+        except PermissionError:
+            perm_errors += 1
+            has_content = True
+        else:
+            has_content = any(
+                c
+                for c in children
+                if (c.is_file() and c in remaining) or (c.is_dir() and c not in would_remove)
+            )
+        if not has_content:
+            would_remove.add(dirpath)
+    return len(would_remove), perm_errors
+
+
 def _print_summary(
     planned: int,
     skipped: int,
@@ -183,12 +224,17 @@ def _print_summary(
     junk_bytes: int,
     tmdb_errors: int,
     dry_run: bool,
+    empty_dirs: int = 0,
+    empty_dirs_simulated: bool = False,
 ) -> None:
     lines = [
         f"  [green]✓[/green]  Planned moves   [bold]{planned:>5}[/bold]",
         f"  [yellow]⚠[/yellow]  Skipped         [bold]{skipped:>5}[/bold]",
         f"  [dim]🗑  Junk files     [bold]{junk_count:>5}[/bold]  ({_fmt_size(junk_bytes)})[/dim]",
     ]
+    if empty_dirs:
+        label = "Empty dirs (sim)" if empty_dirs_simulated else "Empty dirs removed"
+        lines.append(f"  [dim]📂 {label} [bold]{empty_dirs:>5}[/bold][/dim]")
     if tmdb_errors:
         lines.append(f"  [red]✗[/red]  TMDB errors     [bold]{tmdb_errors:>5}[/bold]")
     if dry_run:
@@ -495,7 +541,7 @@ def _lookup_match_chain(
         ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if ai_key:
             try:
-                suggestion = suggest_search(
+                suggestion, _usage = suggest_search(
                     file.parent.name,
                     file.name,
                     ai_key,
@@ -836,7 +882,7 @@ def _try_ai_aside_classification(file: Path, ctx: OrganizeContext) -> AsideKind 
         return AsideKind(cached.lower()) if cached and cached != "MAIN_MEDIA" else None
 
     try:
-        kind_str = suggest_aside_kind(file.parent.name, file.name, api_key)
+        kind_str, _usage = suggest_aside_kind(file.parent.name, file.name, api_key)
     except AiQueryError as exc:
         # Don't abort the whole run — log and treat as "no AI suggestion".
         ctx.logger.warning("ai_aside_classify_error", file=file, error=str(exc))
@@ -1361,8 +1407,11 @@ def _apply_aside_actions(
     return total_bytes
 
 
-def _remove_empty_dirs(root: Path) -> None:
-    """Recursively remove empty directories under root (but not root itself)."""
+def _remove_empty_dirs(root: Path) -> int:
+    """Recursively remove empty directories under root (but not root itself).
+
+    Returns the number of directories actually removed.
+    """
     removed = 0
     for dirpath in sorted(root.rglob("*"), reverse=True):
         if dirpath == root:
@@ -1378,6 +1427,7 @@ def _remove_empty_dirs(root: Path) -> None:
         console.print(
             f"[dim]Cleaned up {removed} empty director{'y' if removed == 1 else 'ies'}.[/dim]"
         )
+    return removed
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1650,6 +1700,23 @@ def organize(
 
     aside_bytes = _apply_aside_actions(aside_actions, dry_run, logger)
 
+    # --cleanup-empty-dirs reporting:
+    #   dry-run → simulate the count so the summary tells the user what would happen
+    #   apply   → run the real rmdir pass and report the actual count
+    empty_dirs = 0
+    empty_dirs_simulated = False
+    if in_place and cleanup_empty_dirs:
+        if dry_run:
+            files_leaving = {m.source for m in plan.moves} | {a.source for a in aside_actions}
+            empty_dirs, perm_errors = _simulate_empty_dirs(source, files_leaving)
+            empty_dirs_simulated = True
+            if perm_errors:
+                console.print(
+                    f"[dim]({perm_errors} dir(s) unreadable — counted as non-empty)[/dim]"
+                )
+        elif apply:
+            empty_dirs = _remove_empty_dirs(source)
+
     _print_summary(
         planned=len(plan.moves),
         skipped=len(plan.skipped),
@@ -1657,6 +1724,8 @@ def organize(
         junk_bytes=aside_bytes,
         tmdb_errors=pipeline.tmdb_errors,
         dry_run=dry_run,
+        empty_dirs=empty_dirs,
+        empty_dirs_simulated=empty_dirs_simulated,
     )
     logger.info(
         "run_finished",
@@ -1666,6 +1735,8 @@ def organize(
         aside_count=len(aside_actions),
         aside_bytes=aside_bytes,
         tmdb_errors=pipeline.tmdb_errors,
+        empty_dirs=empty_dirs,
+        empty_dirs_simulated=empty_dirs_simulated,
         dry_run=dry_run,
     )
     logger.close()
@@ -1675,9 +1746,6 @@ def organize(
             f"\n[yellow]{pipeline.tmdb_errors} TMDB error(s) occurred — see above.[/yellow]"
         )
         raise typer.Exit(1)
-
-    if in_place and apply and cleanup_empty_dirs and not dry_run:
-        _remove_empty_dirs(source)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

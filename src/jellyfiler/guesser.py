@@ -12,6 +12,8 @@ from jellyfiler.models import GuessedMedia, MediaType
 _LEADING_PREFIX = re.compile(r"^[b-df-hj-np-tv-z]\.? (?=[A-Z])")
 # Quality residue guessit sometimes leaves in titles: "ghostbusters 720bd" → "ghostbusters"
 _QUALITY_RESIDUE = re.compile(r"\s+\d{3,4}[bBpP][dD]?\b.*$")
+# Leading episode number with no separator: "003isthislove" → episode=3, stem="isthislove"
+_BARE_EPISODE_PREFIX = re.compile(r"^(\d{2,4})\D")
 # Hey-Arnold-style split-episode marker: "S01E01a" / "S01E01b" → strip 'a/b' so guessit parses,
 # capture the letter so the destination filename keeps the two halves distinct.
 _SEGMENT_LETTER = re.compile(r"(?i)(S\d+E\d+)([a-c])(?=\b|[\s._-])")
@@ -155,6 +157,24 @@ def guess(path: Path) -> GuessedMedia:
             elif raw == "episode":
                 media_type = MediaType.EPISODE
 
+        # If the parent is a season folder (has season number but no show title, e.g. "Season 02")
+        # AND the file itself had no season number (so it's a bare episode file, not a well-named
+        # S01E01 file that already carries the show title), walk up ancestor directories to find
+        # the first one that guessit resolves to a meaningful title.
+        # This covers Show/Season N/bare-episode.mp4 where the episode filename is just the
+        # episode title and the show name lives further up the path.
+        if not dir_title and dir_season is not None and not file_result.get("season"):
+            for ancestor in path.parents[1:]:
+                anc_name = ancestor.name
+                if not anc_name or anc_name in {".", ""}:
+                    break
+                anc_result = _parse_name(anc_name)
+                _, anc_title, _, _, _, _ = _extract(anc_result)
+                if anc_title:
+                    title = anc_title
+                    media_type = MediaType.EPISODE
+                    break
+
     # OVA / OAD / ONA → Season 00 (Jellyfin's Specials convention).
     # Run AFTER parent-dir fallback so an OVA in a "Season 02 + Ovas/" folder
     # still routes to S00 instead of being captured by the season-2 folder.
@@ -164,6 +184,13 @@ def guess(path: Path) -> GuessedMedia:
         # (e.g. Black.Lagoon.OVA.1080p... has no SxxExx and falls to movie type).
         media_type = MediaType.EPISODE
         season = 0
+
+    # Bare numeric episode prefix with no separator: "003isthislove" → episode=3
+    # guessit treats these as movie titles when there is no space/dot/dash before the letters.
+    if episode is None and media_type == MediaType.EPISODE:
+        m = _BARE_EPISODE_PREFIX.match(path.stem)
+        if m:
+            episode = int(m.group(1))
 
     return GuessedMedia(
         source_path=path,

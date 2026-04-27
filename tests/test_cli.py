@@ -92,8 +92,16 @@ def test_title_variants_splits_camelcase():
 
 
 def test_title_variants_word_segments_lowercase():
+    """All-lowercase run-together titles get split + each segment capitalized."""
     variants = _title_variants("wonderwoman")
-    assert "wonder woman" in variants
+    assert "Wonder Woman" in variants
+
+
+def test_title_variants_word_segments_normalized_caps():
+    """Normalized-from-all-caps titles also get word-segmented (e.g. 'BESTGAYICESKATINGANIME')."""
+    # _clean_title would normalize "BESTGAYICESKATINGANIME" to "Bestgayiceskatinganime"
+    variants = _title_variants("Bestgayiceskatinganime")
+    assert any(v == "Best Gay Ice Skating Anime" for v in variants)
 
 
 def test_title_variants_empty_for_clean_title():
