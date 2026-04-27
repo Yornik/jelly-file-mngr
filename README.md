@@ -52,12 +52,13 @@ Quality ranking: filename resolution tag (2160p > 1080p > 720p > 480p) is the pr
 ### TMDB rate limiting
 The TMDB client throttles outbound requests to **40 RPS** by default — comfortably below TMDB's documented 50 RPS cap on free API keys, with a buffer for clock drift and burstiness. If TMDB returns `429 Too Many Requests`, the client honours the `Retry-After` header and retries once. Configurable via `TmdbClient(rps=...)` if you have a paid plan with higher limits; set `rps=0` to disable.
 
-### Parallel TMDB lookups (`--parallel N`)
-Each TMDB call spends most of its time waiting on the network. Pass `--parallel 8` (or `-j 8`) to organize/dedupe to fan lookups out across N worker threads while staying under the global RPS limit:
+### Parallel TMDB lookups (`--parallel N`, default 12)
+Each TMDB call spends most of its time waiting on the network. By default jellyfiler fans lookups out across **12 worker threads** — comfortably under TMDB's 50 RPS cap and a good fit for any modern machine. Pass `-j 1` to force the old sequential behaviour, or `-j 16` to push closer to the rate limit on a fast connection.
 
 ```bash
-uv run jellyfiler organize /source /dest -j 16 --apply
-uv run jellyfiler dedupe   /source /dest -j 16 --quarantine-duplicates --apply
+uv run jellyfiler organize /source /dest --apply              # 12 workers (default)
+uv run jellyfiler organize /source /dest -j 1 --apply         # sequential
+uv run jellyfiler organize /source /dest -j 16 --apply        # push closer to RPS cap
 ```
 
 Three-phase pipeline:
@@ -65,7 +66,7 @@ Three-phase pipeline:
 2. **Lookup** — parallel: TMDB → variant retries → AniList → AI fallback chain runs across N threads. The rate limiter is a global token bucket so all workers share the budget.
 3. **Finalize** — sequential, on the main thread: ambiguous-match prompt, bare-episode prompt, plan + pin.
 
-Output ordering is preserved — phase 3 walks classifications in input order, even though phase 2 completes futures out of order. Empirically `-j 8` to `-j 16` saturates the rate limit on a typical home connection. The AI-disable interactive prompt is suppressed in parallel mode (worker threads can't share stdin); AI errors abort the run instead.
+Output ordering is preserved — phase 3 walks classifications in input order, even though phase 2 completes futures out of order. The AI-disable interactive prompt is suppressed in parallel mode (worker threads can't share stdin); AI errors abort the run instead.
 
 ### Subtitle sidecars
 After each video move, subtitle files sharing the same stem (`.srt`, `.ass`, `.vtt`, `.sub`, `.ssa`, `.sup`) are moved alongside and renamed to match the destination. Language codes are preserved: `episode.en.srt` → `S01E05.en.srt`.
@@ -186,8 +187,8 @@ uv run jellyfiler organize /source /dest --rich-names --apply
 uv run jellyfiler dedupe /source /dest --quarantine-duplicates --apply
 uv run jellyfiler dedupe /source /dest --remove-duplicates --i-mean-it --apply
 
-# Run TMDB lookups in parallel (8 workers, throttled to the global 40 RPS cap)
-uv run jellyfiler organize /source /dest -j 8 --apply
+# Force sequential TMDB lookups (default is 12 parallel workers, throttled to 40 RPS)
+uv run jellyfiler organize /source /dest -j 1 --apply
 
 # Enable Claude Haiku AI fallback for titles that defeat all other parsing
 # (requires ANTHROPIC_API_KEY — off by default to avoid unintentional spend)

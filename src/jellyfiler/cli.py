@@ -1123,12 +1123,12 @@ def organize(
             "--parallel",
             "-j",
             help=(
-                "Run TMDB lookups in parallel with N worker threads (1 = sequential). "
-                "TMDB caps free keys at 50 RPS so the client throttles globally; "
-                "values around 8-16 give the best speedup on large libraries."
+                "Number of parallel TMDB lookup workers. Default 12 — comfortably "
+                "under TMDB's 50 RPS cap and a good fit for any modern machine. "
+                "Pass 1 to force sequential mode."
             ),
         ),
-    ] = 1,
+    ] = 12,
 ) -> None:
     """Scan SOURCE, match against TMDB, and organize into DEST.
 
@@ -1291,11 +1291,11 @@ def dedupe(
             "--parallel",
             "-j",
             help=(
-                "Run TMDB lookups in parallel with N worker threads (1 = sequential). "
-                "Values around 8-16 give the best speedup; capped by TMDB's 50 RPS limit."
+                "Number of parallel TMDB lookup workers. Default 12 — comfortably "
+                "under TMDB's 50 RPS cap. Pass 1 to force sequential mode."
             ),
         ),
-    ] = 1,
+    ] = 12,
 ) -> None:
     """Find and resolve duplicate-destination files in SOURCE.
 
