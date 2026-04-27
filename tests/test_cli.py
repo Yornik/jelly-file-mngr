@@ -351,27 +351,27 @@ def test_organize_use_ai_with_failing_preflight(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_organize_remove_duplicates_without_i_mean_it_aborts(tmp_path: Path):
-    """--remove-duplicates without --i-mean-it must exit with code 1 (big red warning)."""
+def test_dedupe_remove_duplicates_without_i_mean_it_aborts(tmp_path: Path):
+    """`dedupe --remove-duplicates` without --i-mean-it must exit 1 (big red warning)."""
     src = tmp_path / "src"
     src.mkdir()
     dest = tmp_path / "dest"
     with patch.dict(os.environ, {"TMDB_API_KEY": "fake"}):
-        result = runner.invoke(app, ["organize", str(src), str(dest), "--remove-duplicates"])
+        result = runner.invoke(app, ["dedupe", str(src), str(dest), "--remove-duplicates"])
     assert result.exit_code == 1
 
 
-def test_organize_i_mean_it_without_remove_duplicates_aborts(tmp_path: Path):
-    """--i-mean-it on its own makes no sense → exit 1."""
+def test_dedupe_i_mean_it_without_remove_duplicates_aborts(tmp_path: Path):
+    """`dedupe --i-mean-it` alone makes no sense → exit 1."""
     src = tmp_path / "src"
     src.mkdir()
     dest = tmp_path / "dest"
     with patch.dict(os.environ, {"TMDB_API_KEY": "fake"}):
-        result = runner.invoke(app, ["organize", str(src), str(dest), "--i-mean-it"])
+        result = runner.invoke(app, ["dedupe", str(src), str(dest), "--i-mean-it"])
     assert result.exit_code == 1
 
 
-def test_organize_quarantine_and_remove_duplicates_conflict(tmp_path: Path):
+def test_dedupe_quarantine_and_remove_duplicates_conflict(tmp_path: Path):
     """Cannot combine --quarantine-duplicates with --remove-duplicates → exit 1."""
     src = tmp_path / "src"
     src.mkdir()
@@ -380,7 +380,7 @@ def test_organize_quarantine_and_remove_duplicates_conflict(tmp_path: Path):
         result = runner.invoke(
             app,
             [
-                "organize",
+                "dedupe",
                 str(src),
                 str(dest),
                 "--quarantine-duplicates",
@@ -391,18 +391,16 @@ def test_organize_quarantine_and_remove_duplicates_conflict(tmp_path: Path):
     assert result.exit_code == 1
 
 
-def test_organize_remove_duplicates_with_i_mean_it_proceeds(tmp_path: Path):
+def test_dedupe_remove_duplicates_with_i_mean_it_proceeds(tmp_path: Path):
     """Both flags together must NOT abort early — gate passes."""
     src = tmp_path / "src"
     src.mkdir()
-    # Empty source means we exit cleanly before any scanning, but only if the
-    # safety gate passed. If it failed we'd see exit 1 before reaching empty-source.
     dest = tmp_path / "dest"
     with patch.dict(os.environ, {"TMDB_API_KEY": "fake"}):
         result = runner.invoke(
             app,
             [
-                "organize",
+                "dedupe",
                 str(src),
                 str(dest),
                 "--remove-duplicates",
@@ -410,10 +408,10 @@ def test_organize_remove_duplicates_with_i_mean_it_proceeds(tmp_path: Path):
                 "--no-interactive",
             ],
         )
-    assert result.exit_code == 0  # exits clean on "no media files"
+    assert result.exit_code == 0  # empty source → "no media files" exit
 
 
-def test_organize_quarantine_duplicates_alone_proceeds(tmp_path: Path):
+def test_dedupe_quarantine_duplicates_alone_proceeds(tmp_path: Path):
     """--quarantine-duplicates is a single-flag opt-in (recoverable, no double safety)."""
     src = tmp_path / "src"
     src.mkdir()
@@ -421,9 +419,29 @@ def test_organize_quarantine_duplicates_alone_proceeds(tmp_path: Path):
     with patch.dict(os.environ, {"TMDB_API_KEY": "fake"}):
         result = runner.invoke(
             app,
-            ["organize", str(src), str(dest), "--quarantine-duplicates", "--no-interactive"],
+            ["dedupe", str(src), str(dest), "--quarantine-duplicates", "--no-interactive"],
         )
     assert result.exit_code == 0
+
+
+def test_organize_no_longer_accepts_remove_duplicates(tmp_path: Path):
+    """The flag was moved to `dedupe` — `organize` rejects it as an unknown option."""
+    src = tmp_path / "src"
+    src.mkdir()
+    dest = tmp_path / "dest"
+    with patch.dict(os.environ, {"TMDB_API_KEY": "fake"}):
+        result = runner.invoke(app, ["organize", str(src), str(dest), "--remove-duplicates"])
+    assert result.exit_code != 0  # Click exits with 2 for unknown options
+
+
+def test_organize_no_longer_accepts_quarantine_duplicates(tmp_path: Path):
+    """--quarantine-duplicates was moved to `dedupe`."""
+    src = tmp_path / "src"
+    src.mkdir()
+    dest = tmp_path / "dest"
+    with patch.dict(os.environ, {"TMDB_API_KEY": "fake"}):
+        result = runner.invoke(app, ["organize", str(src), str(dest), "--quarantine-duplicates"])
+    assert result.exit_code != 0
 
 
 def test_organize_pinned_match_skips_tmdb(tmp_path: Path):
