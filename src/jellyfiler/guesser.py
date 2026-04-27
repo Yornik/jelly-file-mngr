@@ -31,6 +31,21 @@ def _parse_name(name: str) -> dict[str, object]:
     return dict(guessit.guessit(name))
 
 
+def _is_ova(result: dict[str, object]) -> bool:
+    """True when guessit flagged the name as an OVA / OAD / ONA.
+
+    guessit puts 'Original Animated Video' in the 'other' field whenever it sees
+    OVA, OVAs, OAD, ONA tokens in the release name. We use that as the signal
+    to route the file to Jellyfin's Season 00 (Specials).
+    """
+    other = result.get("other")
+    if isinstance(other, str):
+        return "Original Animated Video" in other
+    if isinstance(other, list):
+        return any("Original Animated Video" in str(o) for o in other)
+    return False
+
+
 def _extract(
     result: dict[str, object],
 ) -> tuple[MediaType, str, int | None, int | None, int | None, int | None]:
@@ -95,6 +110,8 @@ def guess(path: Path) -> GuessedMedia:
     file_result = _parse_name(preprocessed_name)
     media_type, title, year, season, episode, episode_end = _extract(file_result)
 
+    dir_result: dict[str, object] = {}
+
     # Fill gaps using the parent directory name — release groups often put the
     # show title / season / year there even when individual filenames are bare.
     parent_name = path.parent.name
@@ -106,7 +123,8 @@ def guess(path: Path) -> GuessedMedia:
             title = dir_title
         if not year and dir_year:
             year = dir_year
-        if not season and dir_season:
+        # Use `is None` so an explicit season=0 (S00E01) isn't replaced.
+        if season is None and dir_season is not None:
             season = dir_season
         # Prefer file-level media type; fall back to dir if unknown
         if media_type == MediaType.UNKNOWN and dir_result.get("type") != "unknown":
@@ -115,6 +133,16 @@ def guess(path: Path) -> GuessedMedia:
                 media_type = MediaType.MOVIE
             elif raw == "episode":
                 media_type = MediaType.EPISODE
+
+    # OVA / OAD / ONA → Season 00 (Jellyfin's Specials convention).
+    # Run AFTER parent-dir fallback so an OVA in a "Season 02 + Ovas/" folder
+    # still routes to S00 instead of being captured by the season-2 folder.
+    # Check filename + immediate parent (already parsed); avoids re-parsing.
+    if _is_ova(file_result) or _is_ova(dir_result):
+        # OVAs belong in the TV library even when guessit guessed "movie"
+        # (e.g. Black.Lagoon.OVA.1080p... has no SxxExx and falls to movie type).
+        media_type = MediaType.EPISODE
+        season = 0
 
     return GuessedMedia(
         source_path=path,

@@ -186,6 +186,83 @@ def test_movie_coco_year_only():
 
 
 # ---------------------------------------------------------------------------
+# OVAs — routed to Season 00 (Jellyfin's Specials) so they don't collide
+# with main-series numbering. Real filenames sampled from the SMB library.
+# ---------------------------------------------------------------------------
+
+
+def test_ova_with_explicit_s00_already_correct():
+    """[ShadyCrab] FMA Brotherhood OVA - S00E01 — already tagged S00, untouched."""
+    g = guess(
+        Path("Fullmetal Alchemist Brotherhood + OVAs + Specials [BD 1080p Hi10 FLAC] [Dual Audio]")
+        / "[ShadyCrab] Fullmetal Alchemist Brotherhood OVA - S00E01 [BD][1080p][Hi10][Dual][68CE5759].mkv"
+    )
+    assert g.media_type == MediaType.EPISODE
+    assert g.season == 0
+    assert g.episode == 1
+
+
+def test_one_punch_man_s00_ova():
+    """One Punch Man S00E12 OVA — Season 00 folder + explicit S00E."""
+    g = guess(
+        Path("[Breeze] One Punch Man S01 S02 [1080p BD AV1][dual audio]")
+        / "Season 00"
+        / "[Breeze] One Punch Man S00E12 OVA [1080p BD AV1][dual audio].mkv"
+    )
+    assert g.season == 0
+    assert g.episode == 12
+
+
+def test_darker_than_black_ova_routed_to_season_00():
+    """'Darker than Black ... OVA 01' — only episode number + OVA token; we force season=0."""
+    g = guess(
+        Path("Darker Than Black Complete Series [BluRay]")
+        / "Season 02 + Ovas"
+        / "Darker than Black Gemini of the meteor OVA 01.mkv"
+    )
+    assert g.media_type == MediaType.EPISODE
+    assert g.season == 0  # forced by OVA detection
+    assert g.episode == 1
+
+
+def test_ova_in_movie_looking_release_forced_to_episode():
+    """Black.Lagoon.OVA.1080p... — guessit calls this a movie; we force EPISODE + S00."""
+    name = "Black.Lagoon.OVA.1080p.Blu-Ray.10-Bit.Dual-Audio.TrueHD.x265-iAHD"
+    g = guess(Path("Black Lagoon (complete)") / name / f"{name}.mkv")
+    assert g.media_type == MediaType.EPISODE
+    assert g.season == 0
+
+
+def test_ova_via_parent_directory():
+    """A file inside an 'OVA' directory inherits season=0 even without OVA in the filename."""
+    g = guess(
+        Path("[Anime Time] Attack On Titan (Complete Series) (S01-S04+OVA)")
+        / "[Anime Time] Attack On Titan OAD-OVA"
+        / "[Anime Time] Attack On Titan - 03.mkv"
+    )
+    assert g.media_type == MediaType.EPISODE
+    assert g.season == 0
+
+
+def test_dungeon_ova_no_episode_number():
+    """[sam] Dungeon ni Deai - OVA — no episode number, but OVA detected → S00, episode prompt later."""
+    g = guess(
+        Path("Danmachi (is it wrong to pick up girls in a dungeon)(Season 1 to 5 + movie)")
+        / "[sam] Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka [BD 1080p FLAC]"
+        / "[sam] Dungeon ni Deai - OVA [BD 1080p FLAC] [899E43F1].mkv"
+    )
+    assert g.media_type == MediaType.EPISODE
+    assert g.season == 0
+    # episode is None — the bare-episode interactive prompt handles it
+
+
+def test_non_ova_episode_keeps_normal_season():
+    """Sanity check: a regular S01E01 episode is NOT forced to season 0."""
+    g = guess(Path("Futurama Season 12") / "Futurama.S12E01.1080p.x265-ELiTE.mkv")
+    assert g.season == 12  # not 0 — OVA detection didn't fire
+
+
+# ---------------------------------------------------------------------------
 # Junk detection on real filenames
 # ---------------------------------------------------------------------------
 
