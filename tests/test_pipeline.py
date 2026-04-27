@@ -995,6 +995,40 @@ def test_apply_aside_actions_jellyfin_extras_routing(tmp_path: Path):
     assert target.exists()
 
 
+def test_plan_aside_routing_anime_op_ed_goes_to_extras_op_ed(tmp_path: Path):
+    """An NCOP file with a matched parent show routes to <Show>/extras/op-ed/<file>."""
+    from jellyfiler.aside import AsideKind
+    from jellyfiler.cli import _plan_aside_routing
+
+    src = tmp_path / "src"
+    src.mkdir()
+    ncop = src / "[Coalgirls]_Show_NCOP.mkv"
+    ncop.touch()
+    show_episode_src = src / "show.s01e01.mkv"
+    show_episode_src.touch()
+
+    show_planned = PlannedMove(
+        source=show_episode_src,
+        destination=tmp_path / "dst" / "Show" / "Season 01" / "S01E01.mkv",
+        media_type=MediaType.EPISODE,
+        tmdb_id=1,
+        matched_title="Show",
+        confidence="high",
+    )
+    actions = _plan_aside_routing(
+        aside_files=[(ncop, AsideKind.ANIME_OP_ED)],
+        planned_moves=[show_planned],
+        source=src,
+        dest=tmp_path / "dst",
+        remove_discards=False,
+    )
+    assert len(actions) == 1
+    act = actions[0]
+    assert act.action == "jellyfin_extras"
+    expected = tmp_path / "dst" / "Show" / "extras" / "op-ed" / "[Coalgirls]_Show_NCOP.mkv"
+    assert act.destination == expected
+
+
 def test_apply_aside_actions_empty_list_returns_zero(tmp_path: Path):
     from jellyfiler.jsonlog import NullLogger
 

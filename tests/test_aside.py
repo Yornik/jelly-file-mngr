@@ -397,6 +397,41 @@ def test_aside_nced2_numbered_ending(tmp_path):
     assert is_aside(f)
 
 
+def test_ncop_classified_as_anime_op_ed_not_discard(tmp_path):
+    """NCOP files are bonus content, not garbage — preserved to extras/op-ed/."""
+    from jellyfiler.aside import AsideKind, classify_aside
+
+    f = tmp_path / "[Coalgirls]_Ao_no_Exorcist_NCOP_(1920x1080_Blu-Ray_FLAC)_[E92D4C42].mkv"
+    f.touch()
+    assert classify_aside(f) == AsideKind.ANIME_OP_ED
+
+
+def test_creditless_op_classified_as_anime_op_ed(tmp_path):
+    from jellyfiler.aside import AsideKind, classify_aside
+
+    f = tmp_path / "Fate_Stay_Night_Creditless_OP1_[720p,BluRay,x264]_-_THORA.mkv"
+    f.touch()
+    assert classify_aside(f) == AsideKind.ANIME_OP_ED
+
+
+def test_op_dir_classified_as_anime_op_ed(tmp_path):
+    """A folder literally named OP/, ED/, Openings/, Endings/ → ANIME_OP_ED."""
+    from jellyfiler.aside import AsideKind, classify_aside
+
+    op_dir = tmp_path / "OP"
+    op_dir.mkdir()
+    f = op_dir / "show_op.mkv"
+    f.touch()
+    assert classify_aside(f) == AsideKind.ANIME_OP_ED
+
+
+def test_anime_op_ed_routes_to_extras_op_ed_subfolder():
+    """The Jellyfin destination is extras/op-ed (two-level path under the show)."""
+    from jellyfiler.aside import JELLYFIN_EXTRAS_SUBDIR, AsideKind
+
+    assert JELLYFIN_EXTRAS_SUBDIR[AsideKind.ANIME_OP_ED] == "extras/op-ed"
+
+
 def test_aside_creditless_op_anime(tmp_path):
     """Creditless_OP1 — alternative spelling for non-credit opening."""
     f = tmp_path / "Fate_Stay_Night_Creditless_OP1_[720p,BluRay,x264]_-_THORA.mkv"

@@ -32,7 +32,7 @@ console = Console()
 class AsideKind(StrEnum):
     """Type of non-canonical content for routing decisions."""
 
-    DISCARD = "discard"  # samples, NCOP/NCED, hash-named, sidecar files — no value
+    DISCARD = "discard"  # samples, hash-named, sidecar files — no value
     EXTRAS = "extras"  # generic "Extras" / "Bonus" / "DVD Extras"
     FEATURETTES = "featurettes"
     BEHIND_THE_SCENES = "behind_the_scenes"
@@ -41,6 +41,10 @@ class AsideKind(StrEnum):
     TRAILERS = "trailers"
     SHORTS = "shorts"
     BLOOPERS = "bloopers"  # no Jellyfin-specific bucket → routes to extras/
+    # Anime non-credit Opening / Ending tracks. Not a Jellyfin-defined bucket
+    # but clearly bonus content worth preserving — routed to extras/op-ed/ so
+    # it shows up under the Jellyfin Extras tab grouped together.
+    ANIME_OP_ED = "anime_op_ed"
 
 
 # Map our category to the Jellyfin-recognised subdirectory name. Anything not
@@ -54,6 +58,10 @@ JELLYFIN_EXTRAS_SUBDIR: dict[AsideKind, str] = {
     AsideKind.TRAILERS: "trailers",
     AsideKind.SHORTS: "shorts",
     AsideKind.BLOOPERS: "extras",  # Jellyfin has no bloopers bucket — fold into extras
+    # OP/ED tracks live two levels deep so the show folder gets:
+    #   Show/extras/        ← Jellyfin Extras tab
+    #   Show/extras/op-ed/  ← OP/ED files grouped together
+    AsideKind.ANIME_OP_ED: "extras/op-ed",
 }
 
 
@@ -113,14 +121,15 @@ _VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".ts", ".vo
 # When a parent directory name matches one of these, every file inside gets the
 # corresponding kind (unless overridden by a stronger DISCARD signal).
 _DIR_NAME_KIND: list[tuple[re.Pattern[str], AsideKind]] = [
-    # Things that are always DISCARD regardless of where they live
+    # Always DISCARD regardless of where they live
     (re.compile(r"^samples?$", re.IGNORECASE), AsideKind.DISCARD),
     (re.compile(r"^screens?$|^screenshots?$", re.IGNORECASE), AsideKind.DISCARD),
-    (re.compile(r"^OPs?$|^Openings?$", re.IGNORECASE), AsideKind.DISCARD),
-    (re.compile(r"^EDs?$|^Endings?$", re.IGNORECASE), AsideKind.DISCARD),
-    (re.compile(r"^Creditless$", re.IGNORECASE), AsideKind.DISCARD),
-    (re.compile(r"^NC(OP|ED)s?$", re.IGNORECASE), AsideKind.DISCARD),
     (re.compile(r"^Promos?$", re.IGNORECASE), AsideKind.DISCARD),
+    # Anime OP/ED folder names — preserved as bonus content under the show
+    (re.compile(r"^OPs?$|^Openings?$", re.IGNORECASE), AsideKind.ANIME_OP_ED),
+    (re.compile(r"^EDs?$|^Endings?$", re.IGNORECASE), AsideKind.ANIME_OP_ED),
+    (re.compile(r"^Creditless$", re.IGNORECASE), AsideKind.ANIME_OP_ED),
+    (re.compile(r"^NC(OP|ED)s?$", re.IGNORECASE), AsideKind.ANIME_OP_ED),
     # Jellyfin-recognised extras buckets — route into the matching dest subdir
     (re.compile(r"^featurettes?$", re.IGNORECASE), AsideKind.FEATURETTES),
     (re.compile(r"^behind\ the\ scenes$", re.IGNORECASE), AsideKind.BEHIND_THE_SCENES),
@@ -169,8 +178,10 @@ def classify_aside(path: Path) -> AsideKind | None:
             return AsideKind.DISCARD
         if _HEX_HASH.match(stem):
             return AsideKind.DISCARD
+        # Anime non-credit OP/ED tracks: bonus content, not garbage.
+        # Routed to extras/op-ed/ rather than DISCARD.
         if _ANIME_OP_ED.search(stem):
-            return AsideKind.DISCARD
+            return AsideKind.ANIME_OP_ED
 
     # Walk ancestors looking for a known dir-name pattern.
     for parent in path.parents:
