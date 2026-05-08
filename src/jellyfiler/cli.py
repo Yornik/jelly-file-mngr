@@ -1304,6 +1304,35 @@ def _anchor_dir(anchor: PlannedMove) -> Path:
     return anchor.destination.parent
 
 
+# Anime OP/ED filename patterns. Captures kind (Opening/Ending) and an
+# optional number. Matches "[NCOP01]", "[Creditless Opening 02]",
+# "Show.NCED.03", "Non-Credit Ending 01", etc.
+_OP_ED_LABEL = re.compile(
+    r"(?ix)"
+    r"(?:NC|Creditless[\W_]*|Non[\W_]?Credit[\W_]*)"
+    # Longer alternatives first — the regex engine takes the first match
+    # in the alternation, and "OP" would otherwise consume the "Op" of
+    # "Opening" leaving the trailing number unmatched.
+    r"(?P<kind>Opening|Ending|OP|ED)"
+    r"\W*(?P<num>\d{1,3})?"
+)
+
+
+def _op_ed_fancy_name(original: Path, show_name: str) -> str:
+    """Return ``<show>-OP01.<ext>`` (or ``ED``) for an anime OP/ED filename.
+
+    Falls back to the original filename when the OP/ED kind can't be parsed.
+    """
+    m = _OP_ED_LABEL.search(original.stem)
+    if not m:
+        return original.name
+    kind = m.group("kind").upper()
+    short = "OP" if kind in ("OP", "OPENING") else "ED"
+    num_raw = m.group("num")
+    num = f"{int(num_raw):02d}" if num_raw else ""
+    return f"{show_name}-{short}{num}{original.suffix.lower()}"
+
+
 @dataclass
 class AsideAction:
     """One routing decision for an aside file."""
@@ -1351,7 +1380,16 @@ def _plan_aside_routing(
         subdir = JELLYFIN_EXTRAS_SUBDIR.get(kind)
         anchor = _find_anchor(path, planned_moves) if subdir else None
         if subdir and anchor is not None:
-            target = _anchor_dir(anchor) / subdir / path.name
+            anchor_dir = _anchor_dir(anchor)
+            # Anime OP/ED files have noisy bracketed names like
+            # "[NCOP01].mkv" / "[Creditless Opening 02].mkv". Rename to the
+            # cleaner "<Show>-OP01.mkv" form so they group nicely under the
+            # Jellyfin Extras tab. Other extras keep their descriptive names.
+            if kind == AsideKind.ANIME_OP_ED:
+                filename = _op_ed_fancy_name(path, anchor_dir.name)
+            else:
+                filename = path.name
+            target = anchor_dir / subdir / filename
             actions.append(
                 AsideAction(source=path, kind=kind, action="jellyfin_extras", destination=target)
             )

@@ -997,14 +997,23 @@ def test_apply_aside_actions_jellyfin_extras_routing(tmp_path: Path):
 
 
 def test_plan_aside_routing_anime_op_ed_goes_to_extras_op_ed(tmp_path: Path):
-    """An NCOP file with a matched parent show routes to <Show>/extras/op-ed/<file>."""
+    """NCOP/NCED files route to ``<Show>/extras/op-ed/<Show>-OP|ED<NN>.ext``.
+
+    The bracketed release-group prefix and the ``NCOP``/``Creditless Opening``
+    style is rewritten to a clean ``<Show>-OP01.mkv`` form so they group
+    nicely under the Jellyfin Extras tab.
+    """
     from jellyfiler.aside import AsideKind
     from jellyfiler.cli import _plan_aside_routing
 
     src = tmp_path / "src"
     src.mkdir()
-    ncop = src / "[Coalgirls]_Show_NCOP.mkv"
+    ncop = src / "[Coalgirls]_Show_NCOP01.mkv"
     ncop.touch()
+    creditless = src / "[Creditless Opening 02].mkv"
+    creditless.touch()
+    nced = src / "[NCED03].mkv"
+    nced.touch()
     show_episode_src = src / "show.s01e01.mkv"
     show_episode_src.touch()
 
@@ -1017,17 +1026,24 @@ def test_plan_aside_routing_anime_op_ed_goes_to_extras_op_ed(tmp_path: Path):
         confidence="high",
     )
     actions = _plan_aside_routing(
-        aside_files=[(ncop, AsideKind.ANIME_OP_ED)],
+        aside_files=[
+            (ncop, AsideKind.ANIME_OP_ED),
+            (creditless, AsideKind.ANIME_OP_ED),
+            (nced, AsideKind.ANIME_OP_ED),
+        ],
         planned_moves=[show_planned],
         source=src,
         dest=tmp_path / "dst",
         remove_discards=False,
     )
-    assert len(actions) == 1
-    act = actions[0]
-    assert act.action == "jellyfin_extras"
-    expected = tmp_path / "dst" / "Show" / "extras" / "op-ed" / "[Coalgirls]_Show_NCOP.mkv"
-    assert act.destination == expected
+    op_ed_root = tmp_path / "dst" / "Show" / "extras" / "op-ed"
+    assert {a.destination for a in actions} == {
+        op_ed_root / "Show-OP01.mkv",
+        op_ed_root / "Show-OP02.mkv",
+        op_ed_root / "Show-ED03.mkv",
+    }
+    for act in actions:
+        assert act.action == "jellyfin_extras"
 
 
 def test_apply_aside_actions_empty_list_returns_zero(tmp_path: Path):
